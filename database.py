@@ -13,6 +13,7 @@ from timeline_parser import (
 )
 from song_identity import (
     artist_query_matches,
+    canonical_song_title_for_merge,
     choose_display_artist,
     choose_display_title,
     compact_key,
@@ -354,7 +355,7 @@ class SongDatabase:
             if artist_query and (parsed.ambiguous or not artist_query_matches(parsed.artist_keys, artist_query)):
                 continue
 
-            merge_key = compact_key(parsed.song_title)
+            merge_key = compact_key(canonical_song_title_for_merge(parsed.song_title))
             row_artist_key = parsed.artist_group_key
             key = self._find_similar_group_key(
                 grouped=grouped,

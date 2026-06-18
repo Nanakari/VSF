@@ -15,10 +15,25 @@ ARTIST_TOKEN_RE = re.compile(
     r"\s*(?:"
     r"\u00d7|[&\uff06]|\u30fb|\uff0b|\+|"
     r"\s+[xX]\s+|"
-    r"\bfeat\.?\b|\bft\.?\b|\bwith\b|\band\b|"
+    r"\bw\s*[/\uff0f]\s*|\bfeat\.?\b|\bft\.?\b|\bwith\b|\band\b|"
     r"\bcovered\s+by\b|\bcover\s+by\b|"
     r"[/\uff0f]"
     r")\s*",
+    re.IGNORECASE,
+)
+
+TRAILING_VERSION_RE = re.compile(
+    r"\s*(?:-|\u2013|\u2014|\(|\uff08|\[|\uff3b)?\s*"
+    r"(?:"
+    r"(?:[a-z0-9' ]+\s+)?(?:piano|acoustic|guitar|live|karaoke|instrumental|remix|arrange|off\s*vocal)\s*"
+    r"(?:ver\.?|version)?|"
+    r"(?:piano|acoustic|guitar|live|karaoke|instrumental|remix|arrange|off\s*vocal)\s*"
+    r"(?:ver\.?|version)?|"
+    r"ver\.?|version|"
+    r"\u30d4\u30a2\u30ce(?:ver\.?)?|\u30a2\u30b3\u30fc\u30b9\u30c6\u30a3\u30c3\u30af(?:ver\.?)?|"
+    r"\u30ae\u30bf\u30fc(?:ver\.?)?|\u30a2\u30ec\u30f3\u30b8(?:ver\.?)?"
+    r")\s*"
+    r"(?:\)|\uff09|\]|\uff3d)?\s*$",
     re.IGNORECASE,
 )
 
@@ -140,7 +155,7 @@ def split_song_artist(raw_title: str) -> tuple[str, str]:
 
 
 def song_merge_key(raw_title: str) -> str:
-    return compact_key(parse_song_identity(raw_title).song_title)
+    return compact_key(canonical_song_title_for_merge(parse_song_identity(raw_title).song_title))
 
 
 def artist_merge_key(raw_title: str) -> str:
@@ -150,6 +165,15 @@ def artist_merge_key(raw_title: str) -> str:
 def compact_key(value: str) -> str:
     normalized = normalize_song_title(value)
     return re.sub(r"[\W_]+", "", normalized, flags=re.UNICODE)
+
+
+def canonical_song_title_for_merge(song_title: str) -> str:
+    title = clean_song_title(song_title)
+    previous = None
+    while previous != title:
+        previous = title
+        title = TRAILING_VERSION_RE.sub("", title).strip()
+    return clean_song_title(title) or clean_song_title(song_title)
 
 
 def artist_query_matches(artist_keys: set[str] | tuple[str, ...], query: str) -> bool:
@@ -223,7 +247,7 @@ def levenshtein_distance(left: str, right: str, max_distance: int = 2) -> int:
 def choose_display_title(titles: list[str]) -> str:
     if not titles:
         return ""
-    song_titles = [split_song_artist(title)[0] for title in titles]
+    song_titles = [canonical_song_title_for_merge(split_song_artist(title)[0]) for title in titles]
     counts = Counter(song_titles)
     return sorted(
         counts.items(),
@@ -232,7 +256,11 @@ def choose_display_title(titles: list[str]) -> str:
 
 
 def choose_display_artist(titles: list[str]) -> str:
-    artists = [artist for title in titles for artist in parse_song_identity(title).artists]
+    artists = [
+        parsed.artists[0]
+        for title in titles
+        if (parsed := parse_song_identity(title)).artists
+    ]
     if not artists:
         return ""
     counts = Counter(artists)

@@ -17,7 +17,7 @@ from database import SongDatabase
 
 
 PAGE_SIZE = 20
-SHUTDOWN_DELAY_SECONDS = 3
+SHUTDOWN_DELAY_SECONDS = 30
 AUTO_EXIT_ENABLED = bool(getattr(sys, "frozen", False))
 active_clients: dict[str, float] = {}
 active_clients_lock = threading.Lock()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, Iterator
 from urllib.parse import urlparse
@@ -58,9 +59,10 @@ class CommentInfo:
 
 
 class YouTubeClient:
-    def __init__(self, api_key: str, timeout: int = 20) -> None:
+    def __init__(self, api_key: str, timeout: int = 45, max_retries: int = 5) -> None:
         self.api_key = api_key
         self.timeout = timeout
+        self.max_retries = max_retries
         self.session = requests.Session()
 
     def get_video(self, video_id: str) -> VideoInfo:
@@ -232,7 +234,8 @@ class YouTubeClient:
         request_params["key"] = self.api_key
 
         last_error: requests.RequestException | None = None
-        for attempt in range(3):
+        response: requests.Response | None = None
+        for attempt in range(self.max_retries):
             try:
                 response = self.session.get(url, params=request_params, timeout=self.timeout)
                 break
@@ -240,11 +243,14 @@ class YouTubeClient:
                 last_error = exc
             except requests.RequestException as exc:
                 last_error = exc
-            if attempt == 2:
-                response = None
+            if attempt < self.max_retries - 1:
+                time.sleep(min(2**attempt, 10))
 
         if response is None:
-            raise YouTubeAPIError(f"YouTube API request failed for {endpoint}: {last_error}") from last_error
+            raise YouTubeAPIError(
+                f"YouTube API request timed out or failed for {endpoint} "
+                f"after {self.max_retries} attempts. Last error: {last_error}"
+            ) from last_error
 
         if response.ok:
             return response.json()

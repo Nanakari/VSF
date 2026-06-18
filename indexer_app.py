@@ -27,7 +27,7 @@ from youtube_client import (
 DEFAULT_MAX_VIDEOS = 1000
 DEFAULT_MAX_COMMENTS = 100
 SETUP_PORT = 5001
-SHUTDOWN_DELAY_SECONDS = 3
+SHUTDOWN_DELAY_SECONDS = 30
 AUTO_EXIT_ENABLED = bool(getattr(sys, "frozen", False))
 
 job_lock = threading.Lock()

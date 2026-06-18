@@ -126,10 +126,30 @@
               }).catch(() => {});
             }
           };
+          let internalNavigation = false;
+          document.addEventListener("submit", (event) => {
+            const form = event.target;
+            if (form instanceof HTMLFormElement && (!form.action || new URL(form.action, location.href).origin === location.origin)) {
+              internalNavigation = true;
+            }
+          }, true);
+          document.addEventListener("click", (event) => {
+            const link = event.target.closest && event.target.closest("a[href]");
+            if (!link || link.target === "_blank") {
+              return;
+            }
+            const url = new URL(link.href, location.href);
+            if (url.origin === location.origin) {
+              internalNavigation = true;
+            }
+          }, true);
           post("{{ url_for('client_ping') }}");
           const intervalId = window.setInterval(() => post("{{ url_for('client_ping') }}"), 8000);
-          window.addEventListener("pagehide", () => {
+          window.addEventListener("pagehide", (event) => {
             window.clearInterval(intervalId);
+            if (internalNavigation || event.persisted) {
+              return;
+            }
             post("{{ url_for('client_close') }}");
           });
         {% endif %}

@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>VTuber Song Finder</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1><a class="home-link" href="{{ url_for('index') }}">VTuber Song Finder</a></h1>
+          <p class="subtle">本地歌曲时间轴检索库</p>
+        </div>
+        <dl class="stats" aria-label="数据库统计">
+          <div><dt>频道</dt><dd>{{ stats.channels }}</dd></div>
+          <div><dt>视频</dt><dd>{{ stats.videos }}</dd></div>
+          <div><dt>歌曲</dt><dd>{{ stats.songs }}</dd></div>
+        </dl>
+      </header>
+
+      <form class="searchbar" method="get" action="{{ url_for('index') }}">
+        <label>
+          <span>频道名称</span>
+          <input name="channel" value="{{ channel_query }}" placeholder="Shairu / MunMosh">
+        </label>
+        <label>
+          <span>歌曲名称</span>
+          <input name="song" value="{{ song_query }}" placeholder="KING / 怪物 / Stellar Stellar">
+        </label>
+        <label>
+          <span>艺人 / 作者</span>
+          <input name="artist" value="{{ artist_query }}" placeholder="例如 YOASOBI、Ado、米津玄師">
+        </label>
+        <button type="submit">搜索</button>
+      </form>
+
+      {% macro entry_table(entries) -%}
+        <div class="entry-pager" data-page-size="10">
+          <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th class="col-channel">频道</th>
+                <th>直播标题</th>
+                <th class="col-date">发布日期</th>
+                <th class="col-link">链接</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for entry in entries %}
+                <tr data-entry-row>
+                  <td class="channel-cell">{{ entry.channel_title }}</td>
+                  <td>{{ entry.video_title }}</td>
+                  <td class="date">{{ (entry.published_at or "unknown")[:10] }}</td>
+                  <td class="link-cell"><a href="{{ entry.jump_url }}" target="_blank" rel="noopener noreferrer">打开</a></td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          </div>
+          {% if entries|length > 10 %}
+            <div class="entry-page-controls">
+              <button type="button" data-entry-prev>上一页</button>
+              <span data-entry-page-label>第 1 页</span>
+              <button type="button" data-entry-next>下一页</button>
+            </div>
+          {% endif %}
+        </div>
+      {%- endmacro %}
+
+      {% if not has_search %}
+        <section class="channel-grid" aria-label="频道列表">
+          {% for channel in channels %}
+            <a class="channel-card" href="{{ url_for('index', channel=channel.channel_title) }}">
+              <strong>{{ channel.channel_title }}</strong>
+              <span>{{ channel.song_count }} 首歌曲</span>
+            </a>
+          {% endfor %}
+        </section>
+      {% else %}
+        <section class="results" aria-live="polite">
+          {% if not groups %}
+            <div class="empty">
+              <h2>没有找到匹配条目</h2>
+              <p>换一种歌曲或作者写法，或先运行频道索引命令更新数据库。</p>
+            </div>
+          {% else %}
+            <div class="list-head">
+              <span>歌名</span>
+              <span>艺人 / 作者</span>
+            </div>
+            {% for group in groups %}
+              <details class="song-group" {% if single_result_open %}open{% endif %}>
+                <summary>
+                  <span class="chevron" aria-hidden="true">&gt;</span>
+                  <span class="song-name">{{ group.song_title }}</span>
+                  <span class="artist">{{ group.artist or "未知" }}</span>
+                </summary>
+
+                {% if cross_channel_mode %}
+                  <div class="channel-list">
+                    {% for channel in group.channels %}
+                      <details class="channel-group">
+                        <summary>
+                          <span class="chevron small" aria-hidden="true">&gt;</span>
+                          <span class="channel-name">{{ channel.channel_title }}</span>
+                        </summary>
+                        {{ entry_table(channel.entries) }}
+                      </details>
+                    {% endfor %}
+                  </div>
+                {% else %}
+                  {{ entry_table(group.entries) }}
+                {% endif %}
+              </details>
+            {% endfor %}
+
+            <nav class="pager" aria-label="分页">
+              {% if page > 1 %}
+                <a href="{{ url_for('index', channel=channel_query, song=song_query, artist=artist_query, page=page - 1) }}">上一页</a>
+              {% endif %}
+              <span>第 {{ page }} 页</span>
+              {% if has_next %}
+                <a href="{{ url_for('index', channel=channel_query, song=song_query, artist=artist_query, page=page + 1) }}">下一页</a>
+              {% endif %}
+            </nav>
+          {% endif %}
+        </section>
+      {% endif %}
+    </main>
+
+    {% if auto_exit_enabled %}
+      <script>
+        (() => {
+          const clientId = crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random());
+          const payload = () => JSON.stringify({ client_id: clientId });
+          const post = (url) => {
+            try {
+              navigator.sendBeacon(url, new Blob([payload()], { type: "application/json" }));
+            } catch {
+              fetch(url, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: payload(),
+                keepalive: true
+              }).catch(() => {});
+            }
+          };
+          post("{{ url_for('client_ping') }}");
+          const intervalId = window.setInterval(() => post("{{ url_for('client_ping') }}"), 8000);
+          window.addEventListener("pagehide", () => {
+            window.clearInterval(intervalId);
+            post("{{ url_for('client_close') }}");
+          });
+        })();
+      </script>
+    {% endif %}
+    <script>
+      (() => {
+        document.querySelectorAll(".entry-pager").forEach((pager) => {
+          const rows = Array.from(pager.querySelectorAll("[data-entry-row]"));
+          const pageSize = Number(pager.dataset.pageSize || 10);
+          const prev = pager.querySelector("[data-entry-prev]");
+          const next = pager.querySelector("[data-entry-next]");
+          const label = pager.querySelector("[data-entry-page-label]");
+          if (rows.length <= pageSize || !prev || !next || !label) {
+            rows.forEach((row) => { row.hidden = false; });
+            return;
+          }
+
+          let page = 0;
+          const pageCount = Math.ceil(rows.length / pageSize);
+          const render = () => {
+            const start = page * pageSize;
+            const end = start + pageSize;
+            rows.forEach((row, index) => {
+              row.hidden = index < start || index >= end;
+            });
+            prev.disabled = page === 0;
+            next.disabled = page >= pageCount - 1;
+            label.textContent = `第 ${page + 1} 页`;
+          };
+          prev.addEventListener("click", () => {
+            if (page > 0) {
+              page -= 1;
+              render();
+            }
+          });
+          next.addEventListener("click", () => {
+            if (page < pageCount - 1) {
+              page += 1;
+              render();
+            }
+          });
+          render();
+        });
+      })();
+    </script>
+  </body>
+</html>

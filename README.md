@@ -136,6 +136,14 @@ logs/app.log
 
 关闭浏览器页面并成功发送关闭通知后，portable exe 会在确认没有其它页面连接后自动退出相关本地进程。程序不会再因为心跳超时自动退出。
 
+另有独立设置工具 `VTuberSongFinderSetup.exe`，用于创建或更新自己的频道数据库。它不会集成进主搜索程序：
+
+- 双击后打开 `http://127.0.0.1:5001`。
+- 填写自己的 YouTube Data API Key。
+- 输入频道 URL、handle 或 channel ID。
+- 点击“开始索引”，索引结果会写入同目录的 `vtuber_songs.sqlite3`。
+- 完成后再打开 `VTuberSongFinder.exe` 搜索。
+
 ## 限制
 
 - 依赖粉丝是否在评论区写了时间轴或 setlist。

@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>VTuber Song Finder Setup</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>VTuber Song Finder Setup</h1>
+          <p class="subtle">创建或更新本地频道歌曲数据库</p>
+        </div>
+      </header>
+
+      <form id="index-form" class="setup-panel" method="post" action="{{ url_for('start_index') }}">
+        <label>
+          <span>YouTube Data API Key</span>
+          <input name="api_key" type="password" autocomplete="off" placeholder="AIza...">
+        </label>
+        <label>
+          <span>频道 URL / Handle / Channel ID</span>
+          <input name="channel" placeholder="https://www.youtube.com/@Shairu.ch_0801">
+        </label>
+        <div class="setup-grid">
+          <label>
+            <span>扫描上传数</span>
+            <input name="max_videos" type="number" min="1" value="{{ default_max_videos }}">
+          </label>
+          <label>
+            <span>每个视频评论数</span>
+            <input name="max_comments" type="number" min="1" value="{{ default_max_comments }}">
+          </label>
+        </div>
+        <div class="check-row">
+          <label>
+            <input name="save_key" type="checkbox" checked>
+            <span>保存 API Key 到同目录 .env</span>
+          </label>
+          <label>
+            <input name="include_all" type="checkbox">
+            <span>不按歌回标题过滤</span>
+          </label>
+        </div>
+        <button id="start-button" type="submit">开始索引</button>
+      </form>
+
+      <section class="setup-status" aria-live="polite">
+        <div class="status-line">
+          <strong id="status-message">等待开始索引。</strong>
+        </div>
+        <dl class="setup-stats">
+          <div><dt>已扫描视频</dt><dd id="videos-seen">0</dd></div>
+          <div><dt>已索引视频</dt><dd id="videos-indexed">0</dd></div>
+          <div><dt>跳过视频</dt><dd id="videos-skipped">0</dd></div>
+          <div><dt>扫描评论</dt><dd id="comments-seen">0</dd></div>
+          <div><dt>时间轴评论</dt><dd id="timeline-comments">0</dd></div>
+          <div><dt>新增时间点</dt><dd id="entries-inserted">0</dd></div>
+        </dl>
+        <pre id="job-log" class="job-log"></pre>
+      </section>
+    </main>
+
+    <script>
+      (() => {
+        const form = document.querySelector("#index-form");
+        const button = document.querySelector("#start-button");
+        const message = document.querySelector("#status-message");
+        const log = document.querySelector("#job-log");
+        const statMap = {
+          videos_seen: document.querySelector("#videos-seen"),
+          videos_indexed: document.querySelector("#videos-indexed"),
+          videos_skipped: document.querySelector("#videos-skipped"),
+          comments_seen: document.querySelector("#comments-seen"),
+          timeline_comments: document.querySelector("#timeline-comments"),
+          entries_inserted: document.querySelector("#entries-inserted")
+        };
+
+        form.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          button.disabled = true;
+          message.textContent = "正在启动索引任务...";
+          const response = await fetch(form.action, {
+            method: "POST",
+            body: new FormData(form)
+          });
+          const data = await response.json().catch(() => ({}));
+          if (!response.ok) {
+            button.disabled = false;
+            message.textContent = data.message || "启动失败。";
+            return;
+          }
+          message.textContent = data.message || "索引任务已开始。";
+        });
+
+        const refreshStatus = async () => {
+          const response = await fetch("{{ url_for('status') }}");
+          const data = await response.json();
+          message.textContent = data.message || "";
+          const stats = data.stats || {};
+          Object.entries(statMap).forEach(([key, element]) => {
+            element.textContent = String(stats[key] || 0);
+          });
+          log.textContent = (data.log || []).join("\n");
+          log.scrollTop = log.scrollHeight;
+          button.disabled = Boolean(data.running);
+        };
+
+        window.setInterval(refreshStatus, 1500);
+        refreshStatus();
+
+        {% if auto_exit_enabled %}
+          const clientId = crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random());
+          const payload = () => JSON.stringify({ client_id: clientId });
+          const post = (url) => {
+            try {
+              navigator.sendBeacon(url, new Blob([payload()], { type: "application/json" }));
+            } catch {
+              fetch(url, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: payload(),
+                keepalive: true
+              }).catch(() => {});
+            }
+          };
+          post("{{ url_for('client_ping') }}");
+          const intervalId = window.setInterval(() => post("{{ url_for('client_ping') }}"), 8000);
+          window.addEventListener("pagehide", () => {
+            window.clearInterval(intervalId);
+            post("{{ url_for('client_close') }}");
+          });
+        {% endif %}
+      })();
+    </script>
+  </body>
+</html>

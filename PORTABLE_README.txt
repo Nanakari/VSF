@@ -24,5 +24,6 @@ VTuber Song Finder Portable
 
 说明：
 - 这是本地程序，不需要安装 Python。
-- 前端只读取本地 SQLite 数据库，不会自动联网抓取 YouTube。
-- 如果之后要重新索引频道，建议使用源码目录里的命令行工具。
+- 主程序只读取本地 SQLite 数据库，不会自动联网抓取 YouTube。
+- 如果要创建或更新自己的频道数据库，请双击 VTuberSongFinderSetup.exe。
+- 设置工具会打开 http://127.0.0.1:5001，填写 YouTube Data API Key 和频道地址后即可索引。

@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8">
@@ -13,11 +13,17 @@
           <h1><a class="home-link" href="{{ url_for('index') }}">VTuber Song Finder</a></h1>
           <p class="subtle">本地歌曲时间轴检索库</p>
         </div>
-        <dl class="stats" aria-label="数据库统计">
-          <div><dt>频道</dt><dd>{{ stats.channels }}</dd></div>
-          <div><dt>视频</dt><dd>{{ stats.videos }}</dd></div>
-          <div><dt>歌曲</dt><dd>{{ stats.songs }}</dd></div>
-        </dl>
+        <div class="topbar-tools">
+          <dl class="stats" aria-label="数据库统计">
+            <div><dt>频道</dt><dd>{{ stats.channels }}</dd></div>
+            <div><dt>视频</dt><dd>{{ stats.videos }}</dd></div>
+            <div><dt>歌曲</dt><dd>{{ stats.songs }}</dd></div>
+          </dl>
+          <div class="header-actions">
+            <a class="secondary-button button-link" href="{{ setup_url }}">更新</a>
+            <button id="exit-button" class="secondary-button" type="button">退出</button>
+          </div>
+        </div>
       </header>
 
       <form class="searchbar" method="get" action="{{ url_for('index') }}">
@@ -31,7 +37,7 @@
         </label>
         <label>
           <span>艺人 / 作者</span>
-          <input name="artist" value="{{ artist_query }}" placeholder="例如 YOASOBI、Ado、米津玄師">
+          <input name="artist" value="{{ artist_query }}" placeholder="例如 YOASOBI、Ado、米津玄师">
         </label>
         <button type="submit">搜索</button>
       </form>
@@ -39,26 +45,26 @@
       {% macro entry_table(entries) -%}
         <div class="entry-pager" data-page-size="10">
           <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th class="col-channel">频道</th>
-                <th>直播标题</th>
-                <th class="col-date">发布日期</th>
-                <th class="col-link">链接</th>
-              </tr>
-            </thead>
-            <tbody>
-              {% for entry in entries %}
-                <tr data-entry-row>
-                  <td class="channel-cell">{{ entry.channel_title }}</td>
-                  <td>{{ entry.video_title }}</td>
-                  <td class="date">{{ (entry.published_at or "unknown")[:10] }}</td>
-                  <td class="link-cell"><a href="{{ entry.jump_url }}" target="_blank" rel="noopener noreferrer">打开</a></td>
+            <table>
+              <thead>
+                <tr>
+                  <th class="col-channel">频道</th>
+                  <th class="col-title">直播标题</th>
+                  <th class="col-date">发布日期</th>
+                  <th class="col-link">链接</th>
                 </tr>
-              {% endfor %}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {% for entry in entries %}
+                  <tr data-entry-row>
+                    <td class="channel-cell">{{ entry.channel_title }}</td>
+                    <td class="video-title-cell">{{ entry.video_title }}</td>
+                    <td class="date">{{ (entry.published_at or "unknown")[:10] }}</td>
+                    <td class="link-cell"><a href="{{ entry.jump_url }}" target="_blank" rel="noopener noreferrer">打开</a></td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
           </div>
           {% if entries|length > 10 %}
             <div class="entry-page-controls">
@@ -148,28 +154,11 @@
               }).catch(() => {});
             }
           };
-          let internalNavigation = false;
-          document.addEventListener("submit", (event) => {
-            const form = event.target;
-            if (form instanceof HTMLFormElement && (!form.action || new URL(form.action, location.href).origin === location.origin)) {
-              internalNavigation = true;
-            }
-          }, true);
-          document.addEventListener("click", (event) => {
-            const link = event.target.closest && event.target.closest("a[href]");
-            if (!link || link.target === "_blank") {
-              return;
-            }
-            const url = new URL(link.href, location.href);
-            if (url.origin === location.origin) {
-              internalNavigation = true;
-            }
-          }, true);
           post("{{ url_for('client_ping') }}");
-          const intervalId = window.setInterval(() => post("{{ url_for('client_ping') }}"), 8000);
+          const intervalId = window.setInterval(() => post("{{ url_for('client_ping') }}"), 5000);
           window.addEventListener("pagehide", (event) => {
             window.clearInterval(intervalId);
-            if (internalNavigation || event.persisted) {
+            if (event.persisted) {
               return;
             }
             post("{{ url_for('client_close') }}");
@@ -177,8 +166,28 @@
         })();
       </script>
     {% endif %}
+
     <script>
       (() => {
+        const exitButton = document.querySelector("#exit-button");
+        if (exitButton) {
+          exitButton.addEventListener("click", async () => {
+            exitButton.disabled = true;
+            const shutdownUrl = "{{ url_for('shutdown') }}";
+            const closeUrl = "{{ url_for('shutdown_close') }}";
+            try {
+              if (navigator.sendBeacon) {
+                navigator.sendBeacon(shutdownUrl);
+              } else {
+                fetch(shutdownUrl, { method: "POST", keepalive: true }).catch(() => {});
+              }
+            } catch (_) {}
+            window.open("", "_self");
+            window.close();
+            setTimeout(() => { window.location.href = closeUrl; }, 300);
+          });
+        }
+
         document.querySelectorAll(".entry-pager").forEach((pager) => {
           const rows = Array.from(pager.querySelectorAll("[data-entry-row]"));
           const pageSize = Number(pager.dataset.pageSize || 10);
@@ -200,7 +209,7 @@
             });
             prev.disabled = page === 0;
             next.disabled = page >= pageCount - 1;
-            label.textContent = `第 ${page + 1} 页`;
+            label.textContent = "第 " + (page + 1) + " 页";
           };
           prev.addEventListener("click", () => {
             if (page > 0) {
@@ -220,3 +229,7 @@
     </script>
   </body>
 </html>
+
+
+
+

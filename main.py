@@ -84,6 +84,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="Do not filter by singing/karaoke keywords in the title.",
     )
 
+    update_channel = subparsers.add_parser(
+        "update-channel",
+        help="Incrementally index uploads newer than the latest video already in the database.",
+    )
+    update_channel.add_argument(
+        "--channel",
+        required=True,
+        help='Channel handle such as "@Shairu_Vsinger" or channel ID such as "UC...".',
+    )
+    update_channel.add_argument(
+        "--max-videos",
+        type=int,
+        default=1000,
+        help="Safety cap for recent uploads to inspect. Default: 1000.",
+    )
+    update_channel.add_argument(
+        "--max-comments",
+        type=int,
+        default=DEFAULT_MAX_COMMENTS,
+        help=f"Maximum top-level comments to scan per video. Default: {DEFAULT_MAX_COMMENTS}.",
+    )
+    update_channel.add_argument(
+        "--include-all-videos",
+        action="store_true",
+        help="Do not filter by singing/karaoke keywords in the title.",
+    )
+
     search = subparsers.add_parser("search", help="Search indexed song titles.")
     search.add_argument("query", help="Song title keyword.")
     search.add_argument("--channel", help="Optional channel title keyword or channel ID filter.")
@@ -156,6 +183,19 @@ def main(argv: list[str] | None = None) -> int:
             print_index_stats(stats)
             return 0
 
+        if args.command == "update-channel":
+            stats = run_index_channel(
+                db=db,
+                client=client,
+                channel=args.channel,
+                max_videos=args.max_videos,
+                max_comments=args.max_comments,
+                include_all_videos=args.include_all_videos,
+                incremental=True,
+            )
+            print_index_stats(stats)
+            return 0
+
         raise RuntimeError(f"Unknown command: {args.command}")
     except QuotaExceededError as exc:
         print(f"Quota exceeded: {exc}", file=sys.stderr)
@@ -177,13 +217,45 @@ def run_index_channel(
     max_videos: int,
     max_comments: int,
     include_all_videos: bool,
+    incremental: bool = False,
 ) -> IndexStats:
     channel_info = client.get_channel(channel)
     db.upsert_channel(channel_info.channel_id, channel_info.title)
 
+    latest_video = None
+    latest_published_at = None
+    if incremental:
+        latest_video = db.get_latest_video_for_channel(channel_info.channel_id)
+        if latest_video is not None:
+            latest_published_at = latest_video["published_at"]
+
     print(f"Channel: {channel_info.title} ({channel_info.channel_id})")
+    if incremental and latest_video is not None:
+        print(
+            "Latest indexed video: "
+            f"{latest_video['title']} ({latest_video['video_id']}, "
+            f"published {latest_video['published_at'] or 'unknown'})"
+        )
+    elif incremental:
+        print("No existing videos for this channel; indexing from the newest upload.")
+
     stats = IndexStats()
     for upload in client.iter_uploads_playlist(channel_info.uploads_playlist_id, max_videos=max_videos):
+        if incremental and db.video_exists(upload.video_id):
+            print(f"Reached existing video; update is complete: {upload.title} ({upload.video_id})")
+            break
+        if (
+            incremental
+            and latest_published_at
+            and upload.published_at
+            and upload.published_at <= latest_published_at
+        ):
+            print(
+                "Reached latest indexed publish time; "
+                f"update is complete at {upload.title} ({upload.video_id})."
+            )
+            break
+
         stats.videos_seen += 1
         if not include_all_videos and not looks_like_song_stream_title(upload.title):
             stats.videos_skipped += 1

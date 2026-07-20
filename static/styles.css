@@ -1,4 +1,4 @@
-:root {
+﻿:root {
   color-scheme: light;
   --bg: #f6f7f9;
   --panel: #ffffff;
@@ -65,6 +65,21 @@ h1 {
   color: var(--muted);
 }
 
+
+.topbar-tools {
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  gap: 14px;
+  margin-left: auto;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
 .stats {
   display: grid;
   grid-template-columns: repeat(3, minmax(72px, 1fr));
@@ -143,6 +158,28 @@ button:disabled {
   cursor: default;
   opacity: 0.62;
 }
+
+.secondary-button {
+  width: auto;
+  min-width: 72px;
+  padding: 0 16px;
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--accent);
+}
+
+.secondary-button:hover {
+  border-color: var(--accent);
+  background: var(--soft);
+}
+.button-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 40px;
+  text-decoration: none;
+}
+
 
 .setup-panel {
   display: grid;
@@ -437,7 +474,7 @@ button:disabled {
 
 table {
   width: 100%;
-  min-width: 760px;
+  min-width: 980px;
   border-collapse: collapse;
   table-layout: fixed;
 }
@@ -475,15 +512,23 @@ tr:last-child td {
   width: 152px;
 }
 
+.col-title,
+.video-title-cell {
+  width: auto;
+}
+
 .col-date,
 .date {
   width: 112px;
+  text-align: right;
 }
 
 .col-link,
 .link-cell {
-  width: 76px;
+  width: 64px;
+  text-align: right;
 }
+
 
 .date {
   color: var(--muted);
@@ -504,6 +549,16 @@ a:hover {
   .topbar {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .topbar-tools {
+    align-items: stretch;
+    flex-direction: column;
+    margin-left: 0;
+  }
+
+  .header-actions {
+    justify-content: flex-start;
   }
 
   .stats {
@@ -528,3 +583,6 @@ a:hover {
     padding: 10px;
   }
 }
+
+
+

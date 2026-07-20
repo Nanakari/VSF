@@ -2,6 +2,10 @@
 .server.pid
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
 
 build/
 dist/
@@ -15,6 +19,7 @@ flask_stderr.log
 *.sqlite
 *.db
 *.zip
+*.exe
 munmosh_uncertain_excluded.*
 
 .venv/

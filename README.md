@@ -79,6 +79,12 @@ python main.py index-channel --channel "https://www.youtube.com/@Shairu.ch_0801"
 python main.py index-channel --channel "@Shairu_Vsinger" --max-videos 100 --include-all-videos
 ```
 
+从数据库中该频道最新记录开始增量更新，只索引更新的视频：
+
+```bash
+python main.py update-channel --channel "@Shairu_Vsinger" --max-videos 1000
+```
+
 搜索歌曲：
 
 ```bash

@@ -15,6 +15,7 @@ flask_stderr.log
 *.sqlite
 *.db
 *.zip
+*.exe
 munmosh_uncertain_excluded.*
 
 .venv/

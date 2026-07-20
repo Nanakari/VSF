@@ -1,18 +1,21 @@
 from __future__ import annotations
 
+import json
 import logging
 from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
+import socket
+import subprocess
 import sys
 import threading
 import time
 import webbrowser
 
-from flask import Flask, jsonify, render_template, request, url_for
+from flask import Flask, Response, jsonify, redirect, render_template, request, url_for
 from werkzeug.exceptions import HTTPException
 
-from config import get_app_dir, get_database_path, get_resource_dir
+from config import get_app_dir, get_database_path, get_resource_dir, get_youtube_api_key
 from database import SongDatabase
 from main import IndexStats, index_video, merge_stats
 from youtube_client import (
@@ -97,17 +100,30 @@ def index():
         default_max_videos=DEFAULT_MAX_VIDEOS,
         default_max_comments=DEFAULT_MAX_COMMENTS,
         auto_exit_enabled=AUTO_EXIT_ENABLED,
+        search_url=url_for("open_search"),
+        has_saved_api_key=bool(read_saved_api_key()),
     )
 
+
+
+@app.get("/search")
+def open_search():
+    ensure_peer_app("VTuberSongFinder.exe", 5000)
+    return redirect("http://127.0.0.1:5000/launcher?target=/")
 
 @app.post("/start")
 def start_index():
     api_key = request.form.get("api_key", "").strip()
     channel = request.form.get("channel", "").strip()
     include_all = request.form.get("include_all") == "on"
-    save_key = request.form.get("save_key") == "on"
+    incremental = request.form.get("incremental") == "on"
     max_videos = parse_positive_int(request.form.get("max_videos"), DEFAULT_MAX_VIDEOS)
     max_comments = parse_positive_int(request.form.get("max_comments"), DEFAULT_MAX_COMMENTS)
+
+    if api_key:
+        write_env_api_key(api_key)
+    else:
+        api_key = read_saved_api_key()
 
     if not api_key:
         return jsonify({"ok": False, "message": "请填写 YouTube Data API Key。"}), 400
@@ -121,17 +137,13 @@ def start_index():
         job_state["running"] = True
         job_state["message"] = "索引任务已开始。"
 
-    if save_key:
-        write_env_api_key(api_key)
-
     worker = threading.Thread(
         target=run_index_job,
-        args=(api_key, channel, max_videos, max_comments, include_all),
+        args=(api_key, channel, max_videos, max_comments, include_all, incremental),
         daemon=True,
     )
     worker.start()
     return jsonify({"ok": True, "message": "索引任务已开始。"})
-
 
 @app.get("/status")
 def status():
@@ -158,6 +170,28 @@ def client_close():
     return ("", 204)
 
 
+
+@app.post("/shutdown")
+def shutdown():
+    logger.info("Browser requested VTuber Song Finder Setup shutdown")
+    threading.Timer(1.5, force_shutdown).start()
+    return jsonify({"ok": True})
+
+
+
+@app.get("/launcher")
+def launcher():
+    target = request.args.get("target", "/")
+    if not target.startswith("/") or target.startswith("//"):
+        target = "/"
+    target_url = f"http://127.0.0.1:5001{target}"
+    return Response(make_launcher_page("VTuber Song Finder Setup", target_url), mimetype="text/html")
+
+@app.get("/shutdown-close")
+def shutdown_close():
+    logger.info("Browser requested VTuber Song Finder Setup shutdown page")
+    threading.Timer(1.0, force_shutdown).start()
+    return Response(make_close_page("VTuber Song Finder Setup"), mimetype="text/html")
 @app.errorhandler(Exception)
 def handle_unexpected_error(error: Exception):
     if isinstance(error, HTTPException):
@@ -172,6 +206,7 @@ def run_index_job(
     max_videos: int,
     max_comments: int,
     include_all: bool,
+    incremental: bool,
 ) -> None:
     db = SongDatabase(get_database_path())
     db.init_schema()
@@ -182,10 +217,36 @@ def run_index_job(
         db.upsert_channel(channel_info.channel_id, channel_info.title)
         add_log(f"频道：{channel_info.title} ({channel_info.channel_id})")
 
+        latest_video = None
+        latest_published_at = None
+        if incremental:
+            latest_video = db.get_latest_video_for_channel(channel_info.channel_id)
+            if latest_video is not None:
+                latest_published_at = latest_video["published_at"]
+                add_log(
+                    "增量边界："
+                    f"{latest_video['title']} ({latest_video['video_id']}, "
+                    f"published {latest_video['published_at'] or 'unknown'})"
+                )
+            else:
+                add_log("增量更新：该频道暂无已有记录，将从最新上传开始索引。")
+
         for upload in client.iter_uploads_playlist(
             channel_info.uploads_playlist_id,
             max_videos=max_videos,
         ):
+            if incremental and db.video_exists(upload.video_id):
+                add_log(f"到达已有视频，增量更新完成：{upload.title} ({upload.video_id})")
+                break
+            if (
+                incremental
+                and latest_published_at
+                and upload.published_at
+                and upload.published_at <= latest_published_at
+            ):
+                add_log(f"到达数据库最新发布时间，增量更新完成：{upload.title} ({upload.video_id})")
+                break
+
             stats.videos_seen += 1
             update_stats(stats)
             if not include_all and not looks_like_song_stream_title(upload.title):
@@ -273,6 +334,14 @@ def stats_to_dict(stats: IndexStats) -> dict[str, int]:
     }
 
 
+
+
+def read_saved_api_key() -> str:
+    try:
+        return get_youtube_api_key()
+    except RuntimeError:
+        return ""
+
 def write_env_api_key(api_key: str) -> None:
     env_path = get_app_dir() / ".env"
     env_path.write_text(f"YOUTUBE_API_KEY={api_key}\n", encoding="utf-8")
@@ -285,6 +354,36 @@ def parse_positive_int(value: str | None, default: int) -> int:
         return default
     return max(parsed, 1)
 
+
+
+
+def ensure_peer_app(exe_name: str, port: int) -> None:
+    if is_port_open(port):
+        return
+    exe_path = get_app_dir() / exe_name
+    if not exe_path.exists():
+        logger.warning("Peer executable not found: %s", exe_path)
+        return
+    subprocess.Popen(
+        [str(exe_path)],
+        cwd=str(get_app_dir()),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+    )
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if is_port_open(port):
+            return
+        time.sleep(0.2)
+
+
+def is_port_open(port: int) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+            return True
+    except OSError:
+        return False
 
 def get_client_id() -> str:
     data = request.get_json(silent=True) or {}
@@ -319,6 +418,44 @@ def shutdown_if_still_idle() -> None:
     os._exit(0)
 
 
+
+
+
+
+def make_launcher_page(title: str, target_url: str) -> str:
+    target_json = json.dumps(target_url)
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>{title}</title></head>
+<body style="font-family: Segoe UI, Microsoft YaHei, sans-serif; padding: 24px;">
+  <p>正在打开页面...</p>
+  <script>
+    const target = {target_json};
+    const opened = window.open(target, '_blank');
+    if (!opened) {{ window.location.replace(target); }}
+    else {{ window.close(); setTimeout(() => window.location.replace(target), 300); }}
+  </script>
+</body>
+</html>"""
+
+def make_close_page(title: str) -> str:
+    return f"""<!doctype html>
+<html lang=\"zh-CN\">
+<head><meta charset=\"utf-8\"><title>{title} closing</title></head>
+<body style=\"font-family: Segoe UI, Microsoft YaHei, sans-serif; padding: 24px;\">
+  <p>正在退出，若此标签页没有自动关闭，可以手动关闭。</p>
+  <script>
+    window.open('', '_self');
+    window.close();
+    setTimeout(() => {{ document.body.style.background = '#fff'; }}, 300);
+  </script>
+</body>
+</html>"""
+
+def force_shutdown() -> None:
+    logger.info("Exiting VTuber Song Finder Setup by browser request")
+    os._exit(0)
+
 def open_browser_later(url: str) -> None:
     if os.getenv("VTUBER_SONG_FINDER_NO_BROWSER") == "1":
         logger.info("Skipping browser launch because VTUBER_SONG_FINDER_NO_BROWSER=1")
@@ -336,7 +473,7 @@ def open_browser_later(url: str) -> None:
 
 
 if __name__ == "__main__":
-    url = f"http://127.0.0.1:{SETUP_PORT}"
+    url = f"http://127.0.0.1:{SETUP_PORT}/launcher"
     logger.info("Starting VTuber Song Finder Setup")
     logger.info("Application directory: %s", get_app_dir())
     logger.info("Database path: %s", get_database_path())

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
@@ -86,6 +86,9 @@ class SongDatabase:
 
             CREATE INDEX IF NOT EXISTS idx_videos_published_at
                 ON videos(published_at);
+
+            CREATE INDEX IF NOT EXISTS idx_videos_channel_published
+                ON videos(channel_id, published_at DESC);
             """
         )
         self._migrate_schema()
@@ -126,6 +129,28 @@ class SongDatabase:
             (video_id, channel_id, title, published_at, make_video_url(video_id)),
         )
         self.conn.commit()
+
+    def video_exists(self, video_id: str) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM videos WHERE video_id = ?",
+            (video_id,),
+        ).fetchone()
+        return row is not None
+
+    def get_latest_video_for_channel(self, channel_id: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            """
+            SELECT video_id, title, published_at, indexed_at
+            FROM videos
+            WHERE channel_id = ?
+            ORDER BY
+                CASE WHEN published_at IS NULL THEN 1 ELSE 0 END,
+                published_at DESC,
+                indexed_at DESC
+            LIMIT 1
+            """,
+            (channel_id,),
+        ).fetchone()
 
     def insert_song_entries(
         self,
@@ -344,6 +369,15 @@ class SongDatabase:
         normalized_query = normalize_song_title(song_query or "")
         query_key = compact_key(song_query or "")
         artist_query = (artist_query or "").strip()
+        if channel_query and not normalized_query and not artist_query:
+            quick_groups = self.search_channel_groups(
+                channel_query=channel_query,
+                limit=limit,
+                offset=offset,
+            )
+            if quick_groups is not None:
+                return quick_groups
+
         rows = self.search_entries(
             song_query=None if normalized_query else song_query,
             channel_query=channel_query,
@@ -436,6 +470,136 @@ class SongDatabase:
                 )
             )
         return groups[offset : offset + limit]
+
+    def search_channel_groups(
+        self,
+        channel_query: str,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict[str, object]] | None:
+        channel = self.resolve_channel(channel_query)
+        if channel is None:
+            return []
+
+        song_rows = self.conn.execute(
+            """
+            SELECT
+                songs.id AS song_id,
+                songs.channel_id,
+                channels.channel_title,
+                songs.canonical_song_title,
+                songs.normalized_song_title,
+                COUNT(song_entries.id) AS entry_count,
+                MAX(videos.published_at) AS latest_published_at
+            FROM songs
+            JOIN channels ON channels.channel_id = songs.channel_id
+            LEFT JOIN song_entries ON song_entries.song_id = songs.id
+            LEFT JOIN videos ON videos.video_id = song_entries.video_id
+            WHERE songs.channel_id = ?
+            GROUP BY songs.id
+            ORDER BY
+                entry_count DESC,
+                latest_published_at DESC,
+                songs.normalized_song_title
+            LIMIT ? OFFSET ?
+            """,
+            (channel["channel_id"], limit, offset),
+        ).fetchall()
+        if not song_rows:
+            return []
+
+        song_ids = [int(row["song_id"]) for row in song_rows]
+        placeholders = ",".join("?" for _ in song_ids)
+        entry_rows = self.conn.execute(
+            f"""
+            SELECT
+                songs.id AS song_id,
+                songs.canonical_song_title,
+                songs.normalized_song_title,
+                song_entries.raw_song_title,
+                song_entries.timestamp_text,
+                song_entries.seconds,
+                song_entries.jump_url,
+                videos.video_id,
+                videos.title AS video_title,
+                videos.published_at,
+                channels.channel_id,
+                channels.channel_title
+            FROM song_entries
+            JOIN songs ON songs.id = song_entries.song_id
+            JOIN videos ON videos.video_id = song_entries.video_id
+            JOIN channels ON channels.channel_id = videos.channel_id
+            WHERE song_entries.song_id IN ({placeholders})
+            ORDER BY videos.published_at DESC, song_entries.seconds ASC
+            """,
+            tuple(song_ids),
+        ).fetchall()
+
+        groups_by_id: dict[int, dict[str, object]] = {}
+        for row in song_rows:
+            parsed = parse_song_identity(row["canonical_song_title"])
+            song_id = int(row["song_id"])
+            groups_by_id[song_id] = {
+                "channel_id": row["channel_id"],
+                "channel_title": row["channel_title"],
+                "song_key": compact_key(canonical_song_title_for_merge(parsed.song_title)),
+                "artist_key": parsed.artist_group_key,
+                "artist_keys": set(parsed.artist_keys),
+                "title_keys": set(),
+                "song_title": "",
+                "artist": "",
+                "normalized_song_title": row["normalized_song_title"],
+                "raw_titles": [row["canonical_song_title"]],
+                "entries": [],
+            }
+
+        for row in entry_rows:
+            song_id = int(row["song_id"])
+            group = groups_by_id.get(song_id)
+            if group is None:
+                continue
+            group["entries"].append(dict(row))
+            group["raw_titles"].append(row["raw_song_title"])
+
+        groups = [groups_by_id[song_id] for song_id in song_ids]
+        for group in groups:
+            raw_titles = group.pop("raw_titles")
+            group["song_title"] = choose_display_title(raw_titles)
+            group["artist"] = choose_display_artist(raw_titles)
+            group["entries"].sort(
+                key=lambda entry: (
+                    entry.get("published_at") or "",
+                    entry.get("seconds") or 0,
+                ),
+                reverse=True,
+            )
+            group["channels"] = make_channel_groups(group["entries"])
+        return groups
+
+    def resolve_channel(self, channel_query: str) -> sqlite3.Row | None:
+        exact = self.conn.execute(
+            """
+            SELECT channel_id, channel_title
+            FROM channels
+            WHERE channel_id = ? OR channel_title = ? COLLATE NOCASE
+            ORDER BY channel_title
+            LIMIT 1
+            """,
+            (channel_query, channel_query),
+        ).fetchone()
+        if exact is not None:
+            return exact
+
+        return self.conn.execute(
+            """
+            SELECT channel_id, channel_title
+            FROM channels
+            WHERE channel_title LIKE ? ESCAPE '\\'
+            ORDER BY channel_title
+            LIMIT 1
+            """,
+            (f"%{escape_like(channel_query)}%",),
+        ).fetchone()
 
     def _find_similar_group_key(
         self,
@@ -1040,3 +1204,5 @@ def looks_like_count_marker(title: str) -> bool:
     if "\u4eba" in compact and any(char.isdigit() for char in compact):
         return True
     return False
+
+

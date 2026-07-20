@@ -1,4 +1,4 @@
-# -*- mode: python ; coding: utf-8 -*-
+﻿# -*- mode: python ; coding: utf-8 -*-
 
 
 a = Analysis(
@@ -10,7 +10,32 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        'IPython',
+        'PIL',
+        'PyQt5',
+        'astroid',
+        'cloudpickle',
+        'docutils',
+        'gevent',
+        'jedi',
+        'jsonschema',
+        'jupyter_client',
+        'jupyter_core',
+        'lib2to3',
+        'matplotlib',
+        'nbformat',
+        'numpy',
+        'parso',
+        'psutil',
+        'pygments',
+        'pytest',
+        'scipy',
+        'sphinx',
+        'tkinter',
+        'traitlets',
+        'zmq',
+    ],
     noarchive=False,
     optimize=0,
 )
@@ -36,3 +61,6 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
 )
+
+
+

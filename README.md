@@ -1,5 +1,7 @@
 # VTuber Song Finder
 
+[![CI](https://github.com/Nanakari/VSF/actions/workflows/ci.yml/badge.svg)](https://github.com/Nanakari/VSF/actions/workflows/ci.yml)
+
 根据 YouTube VTuber 歌回、直播回放评论区中粉丝整理的时间轴，建立本地“歌曲名 - 视频 - 时间点”SQLite 检索库。
 
 示例可解析的评论行：
@@ -181,3 +183,21 @@ vtuber_song_finder/
 └── static/
     └── styles.css
 ```
+
+## 开发与验证
+
+提交改动前运行：
+
+```powershell
+python -m pip install -r requirements.txt
+python -m pip check
+python -m compileall -q .
+python -c "import app, config, database, indexer_app, main, search, song_identity, timeline_parser, youtube_client"
+```
+
+贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md)，敏感信息和漏洞报告方式见
+[SECURITY.md](SECURITY.md)。
+
+## 许可证
+
+本仓库目前尚未授予开源许可证。除非另有明确说明，否则不可复制、修改或分发其中的代码和资源。

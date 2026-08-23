@@ -91,7 +91,7 @@ def client_close():
     client_id = get_client_id()
     if client_id:
         unregister_client(client_id)
-    schedule_shutdown_if_idle()
+    schedule_shutdown_check()
     return ("", 204)
 
 
@@ -120,7 +120,12 @@ def shutdown_close():
 
 @app.get("/setup")
 def open_setup():
-    ensure_peer_app("VTuberSongFinderSetup.exe", 5001)
+    if not ensure_peer_app("VTuberSongFinderSetup.exe", 5001, "indexer_app.py"):
+        return (
+            "更新工具启动失败，请确认 VTuberSongFinderSetup.exe 与主程序位于同一目录，"
+            f"并查看日志：{LOG_PATH}",
+            503,
+        )
     return redirect("http://127.0.0.1:5001/")
 
 
@@ -204,25 +209,45 @@ def parse_page(value: str | None) -> int:
     return max(parsed, 1)
 
 
-def ensure_peer_app(exe_name: str, port: int) -> None:
+def ensure_peer_app(exe_name: str, port: int, source_script: str | None = None) -> bool:
     if is_port_open(port):
-        return
+        return True
     exe_path = get_app_dir() / exe_name
-    if not exe_path.exists():
+    command: list[str]
+    if exe_path.exists():
+        command = [str(exe_path)]
+    elif not getattr(sys, "frozen", False) and source_script:
+        script_path = get_app_dir() / source_script
+        if not script_path.exists():
+            logger.warning("Peer application not found: %s or %s", exe_path, script_path)
+            return False
+        command = [sys.executable, str(script_path)]
+    else:
         logger.warning("Peer executable not found: %s", exe_path)
-        return
-    subprocess.Popen(
-        [str(exe_path)],
-        cwd=str(get_app_dir()),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        close_fds=True,
-    )
+        return False
+
+    try:
+        child_env = os.environ.copy()
+        child_env["VTUBER_SONG_FINDER_NO_BROWSER"] = "1"
+        subprocess.Popen(
+            command,
+            cwd=str(get_app_dir()),
+            env=child_env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+        )
+    except OSError:
+        logger.exception("Failed to launch peer application: %s", command[0])
+        return False
+
     deadline = time.time() + 5
     while time.time() < deadline:
         if is_port_open(port):
-            return
+            return True
         time.sleep(0.2)
+    logger.error("Peer application did not start listening on port %s", port)
+    return False
 
 
 def is_port_open(port: int) -> bool:
@@ -257,12 +282,14 @@ def register_client(client_id: str) -> None:
     with active_clients_lock:
         active_clients[client_id] = time.monotonic()
         prune_clients_locked()
+    schedule_shutdown_check()
 
 
 def unregister_client(client_id: str) -> None:
     with active_clients_lock:
         active_clients.pop(client_id, None)
         prune_clients_locked()
+    schedule_shutdown_check()
 
 
 def prune_clients_locked() -> None:
@@ -278,11 +305,9 @@ def has_active_clients() -> bool:
         return bool(active_clients)
 
 
-def schedule_shutdown_if_idle() -> None:
+def schedule_shutdown_check() -> None:
     global shutdown_timer
     if not AUTO_EXIT_ENABLED:
-        return
-    if has_active_clients():
         return
     if shutdown_timer and shutdown_timer.is_alive():
         return
@@ -296,9 +321,9 @@ def shutdown_if_still_idle() -> None:
     global shutdown_timer
     if not AUTO_EXIT_ENABLED:
         return
+    shutdown_timer = None
     if has_active_clients():
-        shutdown_timer = None
-        schedule_shutdown_if_idle()
+        schedule_shutdown_check()
         return
     logger.info("No browser clients remain; exiting VTuber Song Finder")
     os._exit(0)
@@ -338,7 +363,7 @@ def force_shutdown() -> None:
     os._exit(0)
 
 if __name__ == "__main__":
-    url = "http://127.0.0.1:5000/launcher"
+    url = "http://127.0.0.1:5000/"
     logger.info("Starting VTuber Song Finder")
     logger.info("Application directory: %s", get_app_dir())
     logger.info("Database path: %s", get_database_path())
@@ -350,8 +375,6 @@ if __name__ == "__main__":
     except Exception:
         logger.exception("Failed to start VTuber Song Finder")
         raise
-
-
 
 
 

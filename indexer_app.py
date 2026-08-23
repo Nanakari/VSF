@@ -30,7 +30,8 @@ from youtube_client import (
 DEFAULT_MAX_VIDEOS = 1000
 DEFAULT_MAX_COMMENTS = 100
 SETUP_PORT = 5001
-SHUTDOWN_DELAY_SECONDS = 30
+CLIENT_STALE_SECONDS = 12
+SHUTDOWN_DELAY_SECONDS = 3
 AUTO_EXIT_ENABLED = bool(getattr(sys, "frozen", False))
 
 job_lock = threading.Lock()
@@ -42,7 +43,7 @@ job_state: dict[str, object] = {
     "log": [],
     "stats": {},
 }
-active_clients: set[str] = set()
+active_clients: dict[str, float] = {}
 active_clients_lock = threading.Lock()
 shutdown_timer: threading.Timer | None = None
 
@@ -108,8 +109,13 @@ def index():
 
 @app.get("/search")
 def open_search():
-    ensure_peer_app("VTuberSongFinder.exe", 5000)
-    return redirect("http://127.0.0.1:5000/launcher?target=/")
+    if not ensure_peer_app("VTuberSongFinder.exe", 5000, "app.py"):
+        return (
+            "搜索工具启动失败，请确认 VTuberSongFinder.exe 与更新工具位于同一目录，"
+            f"并查看日志：{LOG_PATH}",
+            503,
+        )
+    return redirect("http://127.0.0.1:5000/")
 
 @app.post("/start")
 def start_index():
@@ -156,7 +162,9 @@ def client_ping():
     client_id = get_client_id()
     if client_id:
         with active_clients_lock:
-            active_clients.add(client_id)
+            active_clients[client_id] = time.monotonic()
+            prune_clients_locked()
+        schedule_shutdown_check()
     return ("", 204)
 
 
@@ -165,8 +173,9 @@ def client_close():
     client_id = get_client_id()
     if client_id:
         with active_clients_lock:
-            active_clients.discard(client_id)
-    schedule_shutdown_if_idle()
+            active_clients.pop(client_id, None)
+            prune_clients_locked()
+    schedule_shutdown_check()
     return ("", 204)
 
 
@@ -357,25 +366,45 @@ def parse_positive_int(value: str | None, default: int) -> int:
 
 
 
-def ensure_peer_app(exe_name: str, port: int) -> None:
+def ensure_peer_app(exe_name: str, port: int, source_script: str | None = None) -> bool:
     if is_port_open(port):
-        return
+        return True
     exe_path = get_app_dir() / exe_name
-    if not exe_path.exists():
+    command: list[str]
+    if exe_path.exists():
+        command = [str(exe_path)]
+    elif not getattr(sys, "frozen", False) and source_script:
+        script_path = get_app_dir() / source_script
+        if not script_path.exists():
+            logger.warning("Peer application not found: %s or %s", exe_path, script_path)
+            return False
+        command = [sys.executable, str(script_path)]
+    else:
         logger.warning("Peer executable not found: %s", exe_path)
-        return
-    subprocess.Popen(
-        [str(exe_path)],
-        cwd=str(get_app_dir()),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        close_fds=True,
-    )
+        return False
+
+    try:
+        child_env = os.environ.copy()
+        child_env["VTUBER_SONG_FINDER_NO_BROWSER"] = "1"
+        subprocess.Popen(
+            command,
+            cwd=str(get_app_dir()),
+            env=child_env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+        )
+    except OSError:
+        logger.exception("Failed to launch peer application: %s", command[0])
+        return False
+
     deadline = time.time() + 5
     while time.time() < deadline:
         if is_port_open(port):
-            return
+            return True
         time.sleep(0.2)
+    logger.error("Peer application did not start listening on port %s", port)
+    return False
 
 
 def is_port_open(port: int) -> bool:
@@ -390,13 +419,23 @@ def get_client_id() -> str:
     return str(data.get("client_id") or request.form.get("client_id") or "").strip()
 
 
-def schedule_shutdown_if_idle() -> None:
+def prune_clients_locked() -> None:
+    cutoff = time.monotonic() - CLIENT_STALE_SECONDS
+    stale = [client_id for client_id, last_seen in active_clients.items() if last_seen < cutoff]
+    for client_id in stale:
+        active_clients.pop(client_id, None)
+
+
+def has_active_clients() -> bool:
+    with active_clients_lock:
+        prune_clients_locked()
+        return bool(active_clients)
+
+
+def schedule_shutdown_check() -> None:
     global shutdown_timer
     if not AUTO_EXIT_ENABLED:
         return
-    with active_clients_lock:
-        if active_clients:
-            return
     if shutdown_timer and shutdown_timer.is_alive():
         return
 
@@ -406,14 +445,13 @@ def schedule_shutdown_if_idle() -> None:
 
 
 def shutdown_if_still_idle() -> None:
+    global shutdown_timer
     if not AUTO_EXIT_ENABLED:
         return
-    with active_clients_lock:
-        if active_clients:
-            return
-    with job_lock:
-        if job_state.get("running"):
-            return
+    shutdown_timer = None
+    if has_active_clients():
+        schedule_shutdown_check()
+        return
     logger.info("No setup clients remain; exiting VTuber Song Finder Setup")
     os._exit(0)
 
@@ -473,7 +511,7 @@ def open_browser_later(url: str) -> None:
 
 
 if __name__ == "__main__":
-    url = f"http://127.0.0.1:{SETUP_PORT}/launcher"
+    url = f"http://127.0.0.1:{SETUP_PORT}/"
     logger.info("Starting VTuber Song Finder Setup")
     logger.info("Application directory: %s", get_app_dir())
     logger.info("Database path: %s", get_database_path())

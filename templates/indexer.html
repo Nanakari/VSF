@@ -4,6 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>VTuber Song Finder Setup</title>
+    <link rel="icon" href="data:,">
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
   </head>
   <body>
@@ -73,6 +74,7 @@
         const exitButton = document.querySelector("#exit-button");
         const message = document.querySelector("#status-message");
         const log = document.querySelector("#job-log");
+        let formError = "";
         const statMap = {
           videos_seen: document.querySelector("#videos-seen"),
           videos_indexed: document.querySelector("#videos-indexed"),
@@ -84,19 +86,27 @@
 
         form.addEventListener("submit", async (event) => {
           event.preventDefault();
+          formError = "";
           button.disabled = true;
           message.textContent = "正在启动索引任务...";
-          const response = await fetch(form.action, {
-            method: "POST",
-            body: new FormData(form)
-          });
-          const data = await response.json().catch(() => ({}));
-          if (!response.ok) {
+          try {
+            const response = await fetch(form.action, {
+              method: "POST",
+              body: new FormData(form)
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+              formError = data.message || "启动失败。";
+              button.disabled = false;
+              message.textContent = formError;
+              return;
+            }
+            message.textContent = data.message || "索引任务已开始。";
+          } catch (_) {
+            formError = "无法连接更新服务，请重新打开更新页面。";
             button.disabled = false;
-            message.textContent = data.message || "启动失败。";
-            return;
+            message.textContent = formError;
           }
-          message.textContent = data.message || "索引任务已开始。";
         });
 
         exitButton.addEventListener("click", async () => {
@@ -118,7 +128,9 @@
         const refreshStatus = async () => {
           const response = await fetch("{{ url_for('status') }}");
           const data = await response.json();
-          message.textContent = data.message || "";
+          if (!formError) {
+            message.textContent = data.message || "";
+          }
           const stats = data.stats || {};
           Object.entries(statMap).forEach(([key, element]) => {
             element.textContent = String(stats[key] || 0);
@@ -146,28 +158,11 @@
               }).catch(() => {});
             }
           };
-          let internalNavigation = false;
-          document.addEventListener("submit", (event) => {
-            const form = event.target;
-            if (form instanceof HTMLFormElement && (!form.action || new URL(form.action, location.href).origin === location.origin)) {
-              internalNavigation = true;
-            }
-          }, true);
-          document.addEventListener("click", (event) => {
-            const link = event.target.closest && event.target.closest("a[href]");
-            if (!link || link.target === "_blank") {
-              return;
-            }
-            const url = new URL(link.href, location.href);
-            if (url.origin === location.origin) {
-              internalNavigation = true;
-            }
-          }, true);
           post("{{ url_for('client_ping') }}");
-          const intervalId = window.setInterval(() => post("{{ url_for('client_ping') }}"), 8000);
+          const intervalId = window.setInterval(() => post("{{ url_for('client_ping') }}"), 5000);
           window.addEventListener("pagehide", (event) => {
             window.clearInterval(intervalId);
-            if (internalNavigation || event.persisted) {
+            if (event.persisted) {
               return;
             }
             post("{{ url_for('client_close') }}");

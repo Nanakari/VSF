@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 from dataclasses import dataclass
+from typing import Callable
 
 from config import get_database_path, get_youtube_api_key
 from database import SongDatabase
@@ -32,6 +33,7 @@ class IndexStats:
     videos_seen: int = 0
     videos_indexed: int = 0
     videos_skipped: int = 0
+    videos_failed: int = 0
     comments_seen: int = 0
     timeline_comments: int = 0
     entries_inserted: int = 0
@@ -86,7 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     update_channel = subparsers.add_parser(
         "update-channel",
-        help="Incrementally index uploads newer than the latest video already in the database.",
+        help="Scan recent uploads without stopping at existing videos; retry incomplete work.",
     )
     update_channel.add_argument(
         "--channel",
@@ -109,6 +111,38 @@ def build_parser() -> argparse.ArgumentParser:
         "--include-all-videos",
         action="store_true",
         help="Do not filter by singing/karaoke keywords in the title.",
+    )
+
+    backfill_channel = subparsers.add_parser(
+        "backfill-channel",
+        help="Resume historical channel indexing from the saved backfill cursor.",
+    )
+    backfill_channel.add_argument(
+        "--channel",
+        required=True,
+        help='Channel handle such as "@Shairu_Vsinger" or channel ID such as "UC...".',
+    )
+    backfill_channel.add_argument(
+        "--max-videos",
+        type=int,
+        default=1000,
+        help="Maximum older uploads to process in this batch. Default: 1000.",
+    )
+    backfill_channel.add_argument(
+        "--max-comments",
+        type=int,
+        default=DEFAULT_MAX_COMMENTS,
+        help=f"Maximum top-level comments to scan per video. Default: {DEFAULT_MAX_COMMENTS}.",
+    )
+    backfill_channel.add_argument(
+        "--include-all-videos",
+        action="store_true",
+        help="Do not filter by singing/karaoke keywords in the title.",
+    )
+    backfill_channel.add_argument(
+        "--reset",
+        action="store_true",
+        help="Reset the saved historical cursor before starting.",
     )
 
     search = subparsers.add_parser("search", help="Search indexed song titles.")
@@ -196,6 +230,20 @@ def main(argv: list[str] | None = None) -> int:
             print_index_stats(stats)
             return 0
 
+        if args.command == "backfill-channel":
+            stats = run_index_channel(
+                db=db,
+                client=client,
+                channel=args.channel,
+                max_videos=args.max_videos,
+                max_comments=args.max_comments,
+                include_all_videos=args.include_all_videos,
+                backfill=True,
+                reset_backfill=args.reset,
+            )
+            print_index_stats(stats)
+            return 0
+
         raise RuntimeError(f"Unknown command: {args.command}")
     except QuotaExceededError as exc:
         print(f"Quota exceeded: {exc}", file=sys.stderr)
@@ -218,61 +266,197 @@ def run_index_channel(
     max_comments: int,
     include_all_videos: bool,
     incremental: bool = False,
+    backfill: bool = False,
+    reset_backfill: bool = False,
+    on_message: Callable[[str], None] | None = None,
+    on_stats: Callable[[IndexStats], None] | None = None,
 ) -> IndexStats:
+    log = on_message or print
+
     channel_info = client.get_channel(channel)
     db.upsert_channel(channel_info.channel_id, channel_info.title)
 
-    latest_video = None
-    latest_published_at = None
-    if incremental:
-        latest_video = db.get_latest_video_for_channel(channel_info.channel_id)
-        if latest_video is not None:
-            latest_published_at = latest_video["published_at"]
+    if reset_backfill:
+        db.reset_backfill(channel_info.channel_id)
 
-    print(f"Channel: {channel_info.title} ({channel_info.channel_id})")
-    if incremental and latest_video is not None:
-        print(
-            "Latest indexed video: "
-            f"{latest_video['title']} ({latest_video['video_id']}, "
-            f"published {latest_video['published_at'] or 'unknown'})"
-        )
+    log(f"Channel: {channel_info.title} ({channel_info.channel_id})")
+    if backfill:
+        state = db.get_backfill_state(channel_info.channel_id)
+        if state is not None and state["backfill_complete"]:
+            log("Historical backfill is already complete; use --reset to start over.")
+            return IndexStats()
+        if state is not None and state["backfill_before_published_at"]:
+            log(
+                "Resuming historical backfill before "
+                f"{state['backfill_before_published_at']} ({state['backfill_before_video_id']})"
+            )
+        else:
+            log("Starting historical backfill from the newest upload.")
     elif incremental:
-        print("No existing videos for this channel; indexing from the newest upload.")
+        log("Incremental update scans recent uploads without stopping at existing videos.")
+        log("Completed videos are skipped; failed and stale no-timeline videos are retried.")
+    else:
+        log("Scanning uploads from the newest position; existing completed videos are skipped.")
 
     stats = IndexStats()
-    for upload in client.iter_uploads_playlist(channel_info.uploads_playlist_id, max_videos=max_videos):
-        if incremental and db.video_exists(upload.video_id):
-            print(f"Reached existing video; update is complete: {upload.title} ({upload.video_id})")
-            break
-        if (
-            incremental
-            and latest_published_at
-            and upload.published_at
-            and upload.published_at <= latest_published_at
-        ):
-            print(
-                "Reached latest indexed publish time; "
-                f"update is complete at {upload.title} ({upload.video_id})."
+    if not backfill:
+        retry_rows = db.list_videos_for_retry(channel_info.channel_id, max_videos)
+        for row in retry_rows:
+            if not include_all_videos and not looks_like_song_stream_title(row["title"]):
+                db.mark_video_index_status(row["video_id"], "filtered")
+                stats.videos_skipped += 1
+                continue
+            stats.videos_seen += 1
+            log(f"Retrying: {row['title']} ({row['video_id']})")
+            video_stats = index_video(
+                db,
+                client,
+                VideoInfo(
+                    video_id=row["video_id"],
+                    title=row["title"],
+                    channel_id=row["channel_id"],
+                    channel_title=row["channel_title"],
+                    published_at=row["published_at"],
+                    duration_seconds=row["duration_seconds"],
+                ),
+                max_comments,
+                on_message=log,
             )
+            merge_stats(stats, video_stats)
+            notify_stats(on_stats, stats)
+
+    cursor = db.get_backfill_state(channel_info.channel_id) if backfill else None
+    past_cursor = not backfill or cursor is None or not cursor["backfill_before_published_at"]
+    processed_in_batch = 0
+    uploads_exhausted = True
+    playlist_limit = None if backfill else max_videos
+    for upload in client.iter_uploads_playlist(
+        channel_info.uploads_playlist_id,
+        max_videos=playlist_limit,
+    ):
+        if backfill and not past_cursor:
+            cursor_published_at = cursor["backfill_before_published_at"]
+            if upload.video_id == cursor["backfill_before_video_id"]:
+                past_cursor = True
+                continue
+            if upload.published_at and cursor_published_at and upload.published_at < cursor_published_at:
+                past_cursor = True
+            else:
+                continue
+
+        if backfill and processed_in_batch >= max_videos:
+            uploads_exhausted = False
             break
 
         stats.videos_seen += 1
+        processed_in_batch += 1
+        db.upsert_video(
+            upload.video_id,
+            upload.channel_id,
+            upload.title,
+            upload.published_at,
+        )
+        state = db.get_video_index_state(upload.video_id)
+
         if not include_all_videos and not looks_like_song_stream_title(upload.title):
+            db.mark_video_index_status(upload.video_id, "filtered")
             stats.videos_skipped += 1
+            if backfill:
+                db.update_backfill_cursor(
+                    channel_info.channel_id,
+                    upload.published_at,
+                    upload.video_id,
+                )
+            notify_stats(on_stats, stats)
             continue
 
-        print(f"Indexing: {upload.title} ({upload.video_id})")
-        try:
-            full_video = client.get_video(upload.video_id)
-            video_stats = index_video(db, client, full_video, max_comments)
-        except CommentsDisabledError:
-            stats.videos_skipped += 1
-            print(f"  skipped: comments disabled for {upload.video_id}")
+        if not should_process_video(db, upload.video_id):
+            if state is not None and state["index_status"] in {
+                "indexed",
+                "filtered",
+                "no_timeline",
+                "comments_disabled",
+            }:
+                stats.videos_skipped += 1
+            if backfill:
+                db.update_backfill_cursor(
+                    channel_info.channel_id,
+                    upload.published_at,
+                    upload.video_id,
+                )
+            notify_stats(on_stats, stats)
             continue
 
+        log(f"Indexing: {upload.title} ({upload.video_id})")
+        video_stats = index_upload(
+            db,
+            client,
+            upload,
+            max_comments,
+            on_message=log,
+        )
         merge_stats(stats, video_stats)
+        notify_stats(on_stats, stats)
+        if backfill and video_stats.videos_failed:
+            uploads_exhausted = False
+            break
+        if backfill:
+            db.update_backfill_cursor(
+                channel_info.channel_id,
+                upload.published_at,
+                upload.video_id,
+            )
+
+    if backfill and uploads_exhausted:
+        db.mark_backfill_complete(channel_info.channel_id)
+        log("Historical backfill reached the end of the uploads playlist.")
 
     return stats
+
+
+def notify_stats(callback: Callable[[IndexStats], None] | None, stats: IndexStats) -> None:
+    if callback is not None:
+        callback(stats)
+
+
+def should_process_video(db: SongDatabase, video_id: str) -> bool:
+    state = db.get_video_index_state(video_id)
+    if state is None:
+        return True
+    status = state["index_status"]
+    if status in {"discovered", "retry", "indexing"}:
+        return True
+    if status == "no_timeline":
+        return db.video_needs_recheck(video_id, after_days=7)
+    if status == "comments_disabled":
+        return db.video_needs_recheck(video_id, after_days=30)
+    return False
+
+
+def index_upload(
+    db: SongDatabase,
+    client: YouTubeClient,
+    upload: VideoInfo,
+    max_comments: int | None,
+    on_message: Callable[[str], None] | None = None,
+) -> IndexStats:
+    log = on_message or print
+    db.upsert_video(
+        upload.video_id,
+        upload.channel_id,
+        upload.title,
+        upload.published_at,
+    )
+    try:
+        full_video = client.get_video(upload.video_id)
+    except QuotaExceededError:
+        db.mark_video_index_status(upload.video_id, "retry", "YouTube quota exceeded")
+        raise
+    except YouTubeAPIError as exc:
+        db.mark_video_index_status(upload.video_id, "retry", str(exc))
+        log(f"  failed and queued for retry: {upload.video_id} ({exc})")
+        return IndexStats(videos_seen=1, videos_failed=1)
+    return index_video(db, client, full_video, max_comments, on_message=log)
 
 
 def index_video(
@@ -280,10 +464,19 @@ def index_video(
     client: YouTubeClient,
     video: VideoInfo,
     max_comments: int | None,
+    on_message: Callable[[str], None] | None = None,
 ) -> IndexStats:
-    stats = IndexStats(videos_seen=1, videos_indexed=1)
+    log = on_message or print
+    stats = IndexStats(videos_seen=1)
     db.upsert_channel(video.channel_id, video.channel_title)
-    db.upsert_video(video.video_id, video.channel_id, video.title, video.published_at)
+    db.upsert_video(
+        video.video_id,
+        video.channel_id,
+        video.title,
+        video.published_at,
+        duration_seconds=video.duration_seconds,
+    )
+    db.begin_video_index(video.video_id)
 
     try:
         comments = client.get_comments(video.video_id, max_comments=max_comments)
@@ -292,7 +485,10 @@ def index_video(
             stats.comments_seen += 1
             comment_texts.append(comment.text)
 
-        candidate = select_best_timeline_comment(comment_texts)
+        candidate = select_best_timeline_comment(
+            comment_texts,
+            duration_seconds=video.duration_seconds,
+        )
         if candidate:
             stats.timeline_comments = 1
             stats.entries_inserted += db.replace_song_entries_for_video(
@@ -300,9 +496,21 @@ def index_video(
                 entries=candidate.entries,
                 source_comment=candidate.comment_text,
             )
+            db.mark_video_index_status(video.video_id, "indexed", comments_fetched=True)
+        else:
+            db.mark_video_index_status(video.video_id, "no_timeline", comments_fetched=True)
+        stats.videos_indexed = 1
     except CommentsDisabledError:
         stats.videos_skipped += 1
-        print(f"Comments disabled for video: {video.video_id}")
+        db.mark_video_index_status(video.video_id, "comments_disabled", "Comments are disabled")
+        log(f"Comments disabled for video: {video.video_id}")
+    except QuotaExceededError:
+        db.mark_video_index_status(video.video_id, "retry", "YouTube quota exceeded")
+        raise
+    except YouTubeAPIError as exc:
+        stats.videos_failed = 1
+        db.mark_video_index_status(video.video_id, "retry", str(exc))
+        log(f"  failed and queued for retry: {video.video_id} ({exc})")
 
     return stats
 
@@ -343,6 +551,7 @@ def run_list_songs(db: SongDatabase, channel: str | None, limit: int) -> int:
 def merge_stats(total: IndexStats, child: IndexStats) -> None:
     total.videos_indexed += child.videos_indexed
     total.videos_skipped += child.videos_skipped
+    total.videos_failed += child.videos_failed
     total.comments_seen += child.comments_seen
     total.timeline_comments += child.timeline_comments
     total.entries_inserted += child.entries_inserted
@@ -354,6 +563,7 @@ def print_index_stats(stats: IndexStats) -> None:
     print(f"Videos seen: {stats.videos_seen}")
     print(f"Videos indexed: {stats.videos_indexed}")
     print(f"Videos skipped: {stats.videos_skipped}")
+    print(f"Videos failed and queued for retry: {stats.videos_failed}")
     print(f"Comments scanned: {stats.comments_seen}")
     print(f"Timeline comments found: {stats.timeline_comments}")
     print(f"New song entries inserted: {stats.entries_inserted}")

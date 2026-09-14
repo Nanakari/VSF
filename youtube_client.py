@@ -48,6 +48,7 @@ class VideoInfo:
     channel_id: str
     channel_title: str
     published_at: str | None
+    duration_seconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -69,7 +70,7 @@ class YouTubeClient:
         data = self._get(
             "videos",
             {
-                "part": "snippet",
+                "part": "snippet,contentDetails",
                 "id": video_id,
                 "maxResults": 1,
             },
@@ -86,6 +87,9 @@ class YouTubeClient:
             channel_id=snippet.get("channelId", ""),
             channel_title=snippet.get("channelTitle", ""),
             published_at=snippet.get("publishedAt"),
+            duration_seconds=parse_youtube_duration(
+                item.get("contentDetails", {}).get("duration")
+            ),
         )
 
     def get_comments(self, video_id: str, max_comments: int | None = None) -> Iterator[CommentInfo]:
@@ -298,6 +302,23 @@ class YouTubeClient:
 def looks_like_song_stream_title(title: str) -> bool:
     lowered = title.casefold()
     return any(keyword.casefold() in lowered for keyword in SONG_STREAM_KEYWORDS)
+
+
+def parse_youtube_duration(value: str | None) -> int | None:
+    if not value:
+        return None
+    match = re.fullmatch(
+        r"P(?:(?P<days>\d+)D)?T(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+)S)?",
+        value,
+    )
+    if not match:
+        return None
+    return (
+        int(match.group("days") or 0) * 86_400
+        + int(match.group("hours") or 0) * 3_600
+        + int(match.group("minutes") or 0) * 60
+        + int(match.group("seconds") or 0)
+    )
 
 
 def normalize_channel_input(channel: str) -> str:

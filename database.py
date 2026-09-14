@@ -47,7 +47,22 @@ class SongDatabase:
                 title TEXT NOT NULL,
                 published_at TEXT,
                 url TEXT NOT NULL,
+                duration_seconds INTEGER,
                 indexed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                index_status TEXT NOT NULL DEFAULT 'discovered',
+                index_attempts INTEGER NOT NULL DEFAULT 0,
+                last_index_attempt_at TEXT,
+                last_index_error TEXT,
+                comments_fetched_at TEXT,
+                FOREIGN KEY (channel_id) REFERENCES channels(channel_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS channel_index_state (
+                channel_id TEXT PRIMARY KEY,
+                backfill_before_published_at TEXT,
+                backfill_before_video_id TEXT,
+                backfill_complete INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (channel_id) REFERENCES channels(channel_id)
             );
 
@@ -89,9 +104,16 @@ class SongDatabase:
 
             CREATE INDEX IF NOT EXISTS idx_videos_channel_published
                 ON videos(channel_id, published_at DESC);
+
             """
         )
         self._migrate_schema()
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_videos_index_status
+                ON videos(channel_id, index_status, last_index_attempt_at)
+            """
+        )
         if self._needs_song_backfill():
             self._backfill_song_hierarchy()
         self.conn.commit()
@@ -114,19 +136,30 @@ class SongDatabase:
         channel_id: str,
         title: str,
         published_at: str | None,
+        duration_seconds: int | None = None,
     ) -> None:
         self.conn.execute(
             """
-            INSERT INTO videos (video_id, channel_id, title, published_at, url, indexed_at)
-            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            INSERT INTO videos (
+                video_id, channel_id, title, published_at, url, duration_seconds, indexed_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(video_id) DO UPDATE SET
                 channel_id = excluded.channel_id,
                 title = excluded.title,
                 published_at = excluded.published_at,
                 url = excluded.url,
+                duration_seconds = COALESCE(excluded.duration_seconds, videos.duration_seconds),
                 indexed_at = CURRENT_TIMESTAMP
             """,
-            (video_id, channel_id, title, published_at, make_video_url(video_id)),
+            (
+                video_id,
+                channel_id,
+                title,
+                published_at,
+                make_video_url(video_id),
+                duration_seconds,
+            ),
         )
         self.conn.commit()
 
@@ -136,6 +169,162 @@ class SongDatabase:
             (video_id,),
         ).fetchone()
         return row is not None
+
+    def get_video_index_state(self, video_id: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            """
+            SELECT video_id, channel_id, title, published_at, duration_seconds,
+                   index_status, index_attempts, last_index_attempt_at, last_index_error
+            FROM videos
+            WHERE video_id = ?
+            """,
+            (video_id,),
+        ).fetchone()
+
+    def begin_video_index(self, video_id: str) -> None:
+        self.conn.execute(
+            """
+            UPDATE videos
+            SET index_status = 'indexing',
+                index_attempts = COALESCE(index_attempts, 0) + 1,
+                last_index_attempt_at = CURRENT_TIMESTAMP,
+                last_index_error = NULL
+            WHERE video_id = ?
+            """,
+            (video_id,),
+        )
+        self.conn.commit()
+
+    def mark_video_index_status(
+        self,
+        video_id: str,
+        status: str,
+        error: str | None = None,
+        comments_fetched: bool = False,
+    ) -> None:
+        self.conn.execute(
+            """
+            UPDATE videos
+            SET index_status = ?,
+                last_index_error = ?,
+                comments_fetched_at = CASE
+                    WHEN ? THEN CURRENT_TIMESTAMP
+                    ELSE comments_fetched_at
+                END
+            WHERE video_id = ?
+            """,
+            (status, error, comments_fetched, video_id),
+        )
+        self.conn.commit()
+
+    def video_needs_recheck(self, video_id: str, after_days: int) -> bool:
+        interval = f"-{max(1, int(after_days))} days"
+        row = self.conn.execute(
+            """
+            SELECT 1
+            FROM videos
+            WHERE video_id = ?
+              AND (
+                    last_index_attempt_at IS NULL
+                    OR last_index_attempt_at <= datetime('now', ?)
+              )
+            """,
+            (video_id, interval),
+        ).fetchone()
+        return row is not None
+
+    def list_videos_for_retry(self, channel_id: str, limit: int) -> list[sqlite3.Row]:
+        rows = self.conn.execute(
+            """
+            SELECT
+                videos.video_id,
+                videos.channel_id,
+                videos.title,
+                videos.published_at,
+                videos.duration_seconds,
+                channels.channel_title,
+                videos.index_status
+            FROM videos
+            JOIN channels ON channels.channel_id = videos.channel_id
+            WHERE videos.channel_id = ?
+              AND (
+                    videos.index_status IN ('retry', 'indexing')
+                    OR (
+                        videos.index_status = 'no_timeline'
+                        AND (
+                            videos.last_index_attempt_at IS NULL
+                            OR videos.last_index_attempt_at <= datetime('now', '-7 days')
+                        )
+                    )
+                    OR (
+                        videos.index_status = 'comments_disabled'
+                        AND (
+                            videos.last_index_attempt_at IS NULL
+                            OR videos.last_index_attempt_at <= datetime('now', '-30 days')
+                        )
+                    )
+              )
+            ORDER BY
+                CASE WHEN videos.index_status IN ('retry', 'indexing') THEN 0 ELSE 1 END,
+                videos.published_at DESC,
+                videos.video_id
+            LIMIT ?
+            """,
+            (channel_id, max(1, int(limit))),
+        ).fetchall()
+        return list(rows)
+
+    def get_backfill_state(self, channel_id: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            """
+            SELECT channel_id, backfill_before_published_at, backfill_before_video_id,
+                   backfill_complete, updated_at
+            FROM channel_index_state
+            WHERE channel_id = ?
+            """,
+            (channel_id,),
+        ).fetchone()
+
+    def update_backfill_cursor(
+        self,
+        channel_id: str,
+        published_at: str | None,
+        video_id: str,
+    ) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO channel_index_state (
+                channel_id, backfill_before_published_at, backfill_before_video_id,
+                backfill_complete, updated_at
+            )
+            VALUES (?, ?, ?, 0, CURRENT_TIMESTAMP)
+            ON CONFLICT(channel_id) DO UPDATE SET
+                backfill_before_published_at = excluded.backfill_before_published_at,
+                backfill_before_video_id = excluded.backfill_before_video_id,
+                backfill_complete = 0,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (channel_id, published_at, video_id),
+        )
+        self.conn.commit()
+
+    def mark_backfill_complete(self, channel_id: str) -> None:
+        self.conn.execute(
+            """
+            UPDATE channel_index_state
+            SET backfill_complete = 1, updated_at = CURRENT_TIMESTAMP
+            WHERE channel_id = ?
+            """,
+            (channel_id,),
+        )
+        self.conn.commit()
+
+    def reset_backfill(self, channel_id: str) -> None:
+        self.conn.execute(
+            "DELETE FROM channel_index_state WHERE channel_id = ?",
+            (channel_id,),
+        )
+        self.conn.commit()
 
     def get_latest_video_for_channel(self, channel_id: str) -> sqlite3.Row | None:
         return self.conn.execute(
@@ -220,19 +409,26 @@ class SongDatabase:
     def rebuild_best_timeline_comments(self) -> dict[str, int]:
         rows = self.conn.execute(
             """
-            SELECT video_id, source_comment
+            SELECT song_entries.video_id, song_entries.source_comment,
+                   videos.duration_seconds
             FROM song_entries
-            GROUP BY video_id, source_comment
+            JOIN videos ON videos.video_id = song_entries.video_id
+            GROUP BY song_entries.video_id, song_entries.source_comment, videos.duration_seconds
             """
         ).fetchall()
         comments_by_video: dict[str, list[str]] = {}
+        durations: dict[str, int | None] = {}
         for row in rows:
             comments_by_video.setdefault(row["video_id"], []).append(row["source_comment"])
+            durations[row["video_id"]] = row["duration_seconds"]
 
         videos_changed = 0
         entries_before = self._count_table("song_entries")
         for video_id, comments in comments_by_video.items():
-            candidate = select_best_timeline_comment(comments)
+            candidate = select_best_timeline_comment(
+                comments,
+                duration_seconds=durations.get(video_id),
+            )
             if candidate is None:
                 continue
             videos_changed += 1
@@ -847,6 +1043,39 @@ class SongDatabase:
         return int(row["count"])
 
     def _migrate_schema(self) -> None:
+        video_columns = {
+            row["name"]
+            for row in self.conn.execute("PRAGMA table_info(videos)").fetchall()
+        }
+        video_migrations = {
+            "duration_seconds": "ALTER TABLE videos ADD COLUMN duration_seconds INTEGER",
+            "index_status": "ALTER TABLE videos ADD COLUMN index_status TEXT NOT NULL DEFAULT 'discovered'",
+            "index_attempts": "ALTER TABLE videos ADD COLUMN index_attempts INTEGER NOT NULL DEFAULT 0",
+            "last_index_attempt_at": "ALTER TABLE videos ADD COLUMN last_index_attempt_at TEXT",
+            "last_index_error": "ALTER TABLE videos ADD COLUMN last_index_error TEXT",
+            "comments_fetched_at": "ALTER TABLE videos ADD COLUMN comments_fetched_at TEXT",
+        }
+        for column, statement in video_migrations.items():
+            if column not in video_columns:
+                self.conn.execute(statement)
+
+        # Rows written by older versions had no way to distinguish a completed
+        # scan from a failed comment request. Entries prove that a timeline was
+        # indexed; everything else is deliberately retried once after upgrade.
+        self.conn.execute(
+            """
+            UPDATE videos
+            SET index_status = CASE
+                WHEN EXISTS (
+                    SELECT 1 FROM song_entries
+                    WHERE song_entries.video_id = videos.video_id
+                ) THEN 'indexed'
+                ELSE 'retry'
+            END
+            WHERE index_status = 'discovered'
+            """
+        )
+
         columns = {
             row["name"]
             for row in self.conn.execute("PRAGMA table_info(song_entries)").fetchall()
@@ -1205,4 +1434,3 @@ def looks_like_count_marker(title: str) -> bool:
     if "\u4eba" in compact and any(char.isdigit() for char in compact):
         return True
     return False
-

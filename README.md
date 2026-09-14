@@ -81,10 +81,22 @@ python main.py index-channel --channel "https://www.youtube.com/@Shairu.ch_0801"
 python main.py index-channel --channel "@Shairu_Vsinger" --max-videos 100 --include-all-videos
 ```
 
-从数据库中该频道最新记录开始增量更新，只索引更新的视频：
+扫描最新上传并增量更新；已完成的视频会跳过，失败的视频会保留为待重试状态，暂时没有时间轴的视频会定期复查：
 
 ```bash
 python main.py update-channel --channel "@Shairu_Vsinger" --max-videos 1000
+```
+
+历史回填支持从上次中断位置继续：
+
+```bash
+python main.py backfill-channel --channel "@Shairu_Vsinger" --max-videos 1000
+```
+
+如需重新开始历史回填：
+
+```bash
+python main.py backfill-channel --channel "@Shairu_Vsinger" --reset --max-videos 1000
 ```
 
 搜索歌曲：

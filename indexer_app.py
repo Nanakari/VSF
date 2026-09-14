@@ -17,13 +17,11 @@ from werkzeug.exceptions import HTTPException
 
 from config import get_app_dir, get_database_path, get_resource_dir, get_youtube_api_key
 from database import SongDatabase
-from main import IndexStats, index_video, merge_stats
+from main import IndexStats, run_index_channel
 from youtube_client import (
-    CommentsDisabledError,
     QuotaExceededError,
     YouTubeAPIError,
     YouTubeClient,
-    looks_like_song_stream_title,
 )
 
 
@@ -122,7 +120,12 @@ def start_index():
     api_key = request.form.get("api_key", "").strip()
     channel = request.form.get("channel", "").strip()
     include_all = request.form.get("include_all") == "on"
-    incremental = request.form.get("incremental") == "on"
+    mode = request.form.get("mode", "")
+    if not mode:
+        mode = "incremental" if request.form.get("incremental") == "on" else "full"
+    if mode not in {"incremental", "full", "backfill"}:
+        return jsonify({"ok": False, "message": "无效的索引模式。"}), 400
+    reset_backfill = request.form.get("reset_backfill") == "on"
     max_videos = parse_positive_int(request.form.get("max_videos"), DEFAULT_MAX_VIDEOS)
     max_comments = parse_positive_int(request.form.get("max_comments"), DEFAULT_MAX_COMMENTS)
 
@@ -145,7 +148,7 @@ def start_index():
 
     worker = threading.Thread(
         target=run_index_job,
-        args=(api_key, channel, max_videos, max_comments, include_all, incremental),
+        args=(api_key, channel, max_videos, max_comments, include_all, mode, reset_backfill),
         daemon=True,
     )
     worker.start()
@@ -215,67 +218,27 @@ def run_index_job(
     max_videos: int,
     max_comments: int,
     include_all: bool,
-    incremental: bool,
+    mode: str,
+    reset_backfill: bool,
 ) -> None:
     db = SongDatabase(get_database_path())
     db.init_schema()
     stats = IndexStats()
     try:
         client = YouTubeClient(api_key)
-        channel_info = client.get_channel(channel)
-        db.upsert_channel(channel_info.channel_id, channel_info.title)
-        add_log(f"频道：{channel_info.title} ({channel_info.channel_id})")
-
-        latest_video = None
-        latest_published_at = None
-        if incremental:
-            latest_video = db.get_latest_video_for_channel(channel_info.channel_id)
-            if latest_video is not None:
-                latest_published_at = latest_video["published_at"]
-                add_log(
-                    "增量边界："
-                    f"{latest_video['title']} ({latest_video['video_id']}, "
-                    f"published {latest_video['published_at'] or 'unknown'})"
-                )
-            else:
-                add_log("增量更新：该频道暂无已有记录，将从最新上传开始索引。")
-
-        for upload in client.iter_uploads_playlist(
-            channel_info.uploads_playlist_id,
+        stats = run_index_channel(
+            db=db,
+            client=client,
+            channel=channel,
             max_videos=max_videos,
-        ):
-            if incremental and db.video_exists(upload.video_id):
-                add_log(f"到达已有视频，增量更新完成：{upload.title} ({upload.video_id})")
-                break
-            if (
-                incremental
-                and latest_published_at
-                and upload.published_at
-                and upload.published_at <= latest_published_at
-            ):
-                add_log(f"到达数据库最新发布时间，增量更新完成：{upload.title} ({upload.video_id})")
-                break
-
-            stats.videos_seen += 1
-            update_stats(stats)
-            if not include_all and not looks_like_song_stream_title(upload.title):
-                stats.videos_skipped += 1
-                update_stats(stats)
-                continue
-
-            add_log(f"索引：{upload.title} ({upload.video_id})")
-            try:
-                full_video = client.get_video(upload.video_id)
-                video_stats = index_video(db, client, full_video, max_comments)
-            except CommentsDisabledError:
-                stats.videos_skipped += 1
-                add_log(f"跳过：评论关闭 {upload.video_id}")
-                update_stats(stats)
-                continue
-
-            merge_stats(stats, video_stats)
-            update_stats(stats)
-
+            max_comments=max_comments,
+            include_all_videos=include_all,
+            incremental=mode == "incremental",
+            backfill=mode == "backfill",
+            reset_backfill=reset_backfill,
+            on_message=add_log,
+            on_stats=update_stats,
+        )
         finish_job(True, "索引完成。", stats)
     except QuotaExceededError as exc:
         finish_job(False, f"YouTube API quota 已用尽：{exc}", stats)
@@ -337,6 +300,7 @@ def stats_to_dict(stats: IndexStats) -> dict[str, int]:
         "videos_seen": stats.videos_seen,
         "videos_indexed": stats.videos_indexed,
         "videos_skipped": stats.videos_skipped,
+        "videos_failed": stats.videos_failed,
         "comments_seen": stats.comments_seen,
         "timeline_comments": stats.timeline_comments,
         "entries_inserted": stats.entries_inserted,

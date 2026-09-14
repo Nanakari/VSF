@@ -131,6 +131,35 @@ NON_SONG_EXACT = {
     "b\u30d1\u30fc\u30c8",
     "c\u30d1\u30fc\u30c8",
 }
+NON_SONG_WORD_KEYWORDS = (
+    "mc",
+    "talk",
+    "chat",
+    "free talk",
+    "zatsu",
+    "opening",
+    "ending",
+    "start",
+    "end",
+    "break",
+    "superchat",
+    "reading",
+    "comment",
+    "encore",
+    "announcement",
+    "notice",
+    "asmr",
+    "fanbox",
+)
+NON_SONG_TEXT_KEYWORDS = tuple(
+    keyword for keyword in NON_SONG_KEYWORDS if keyword not in NON_SONG_WORD_KEYWORDS
+)
+NON_SONG_WORD_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:"
+    + "|".join(re.escape(keyword) for keyword in NON_SONG_WORD_KEYWORDS)
+    + r")(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
 SONG_HINT_KEYWORDS = (
     "cover",
     "original",
@@ -164,9 +193,13 @@ def timestamp_to_seconds(timestamp_text: str) -> int:
     parts = [int(part) for part in timestamp_text.strip().split(":")]
     if len(parts) == 2:
         minutes, seconds = parts
+        if minutes < 0 or not 0 <= seconds < 60:
+            raise ValueError(f"Invalid timestamp: {timestamp_text}")
         return minutes * 60 + seconds
     if len(parts) == 3:
         hours, minutes, seconds = parts
+        if hours < 0 or not 0 <= minutes < 60 or not 0 <= seconds < 60:
+            raise ValueError(f"Invalid timestamp: {timestamp_text}")
         return hours * 3600 + minutes * 60 + seconds
     raise ValueError(f"Unsupported timestamp format: {timestamp_text}")
 
@@ -226,11 +259,11 @@ def is_probable_song_title(
     if COUNT_PERSON_RE.search(raw_title):
         return False
 
-    if ARTIST_SEPARATOR_RE.search(raw_title):
-        return True
-
     if looks_like_non_song(raw_title, normalized_title):
         return False
+
+    if ARTIST_SEPARATOR_RE.search(raw_title):
+        return True
 
     if any(keyword in normalized_title for keyword in SONG_HINT_KEYWORDS):
         return True
@@ -254,7 +287,10 @@ def looks_like_non_song(raw_title: str, normalized_title: str) -> bool:
     if compact in NON_SONG_EXACT:
         return True
 
-    if any(keyword in normalized_title or keyword in raw_folded for keyword in NON_SONG_KEYWORDS):
+    if NON_SONG_WORD_RE.search(raw_folded):
+        return True
+
+    if any(keyword in normalized_title or keyword in raw_folded for keyword in NON_SONG_TEXT_KEYWORDS):
         return True
 
     if contains_explanatory_marker(raw_title):
@@ -320,11 +356,14 @@ def parse_timeline_entries(comment_text: str) -> list[TimelineEntry]:
     candidate = build_timeline_candidate(comment_text)
     return candidate.entries if candidate else []
 
-def select_best_timeline_comment(comment_texts: list[str]) -> TimelineCandidate | None:
+def select_best_timeline_comment(
+    comment_texts: list[str],
+    duration_seconds: int | None = None,
+) -> TimelineCandidate | None:
     candidates = [
         candidate
         for comment_text in comment_texts
-        if (candidate := build_timeline_candidate(comment_text)) is not None
+        if (candidate := build_timeline_candidate(comment_text, duration_seconds=duration_seconds)) is not None
     ]
     if not candidates:
         return None
@@ -336,7 +375,10 @@ def select_best_timeline_comment(comment_texts: list[str]) -> TimelineCandidate 
     return max(candidates, key=lambda candidate: (candidate.score, len(candidate.entries)))
 
 
-def build_timeline_candidate(comment_text: str) -> TimelineCandidate | None:
+def build_timeline_candidate(
+    comment_text: str,
+    duration_seconds: int | None = None,
+) -> TimelineCandidate | None:
     if len(TIMESTAMP_RE.findall(comment_text)) < 2:
         return None
 
@@ -348,28 +390,23 @@ def build_timeline_candidate(comment_text: str) -> TimelineCandidate | None:
     ]
     has_marker = bool(marker_indexes)
 
-    blocks: list[list[TimelineEntry]] = []
-    if has_marker:
-        for marker_index in marker_indexes:
-            blocks.extend(
-                parse_timeline_blocks(
-                    lines=lines,
-                    start_index=marker_index,
-                    stop_after_first=True,
-                )
-            )
-    else:
-        blocks = parse_timeline_blocks(
-            lines=lines,
-            start_index=0,
-            stop_after_first=False,
-        )
+    start_index = marker_indexes[0] if has_marker else 0
+    blocks = parse_timeline_blocks(
+        lines=lines,
+        start_index=start_index,
+        stop_after_first=False,
+        duration_seconds=duration_seconds,
+    )
 
     blocks = [block for block in blocks if len(block) >= 2]
     if not blocks:
         return None
 
-    entries = max(blocks, key=lambda block: (len(block), timeline_span(block)))
+    entries = normalize_timeline_entries(
+        max(blocks, key=lambda block: (len(block), timeline_span(block)))
+    )
+    if len(entries) < 2:
+        return None
     return TimelineCandidate(
         comment_text=comment_text,
         entries=entries,
@@ -382,13 +419,14 @@ def parse_timeline_blocks(
     lines: list[str],
     start_index: int,
     stop_after_first: bool,
+    duration_seconds: int | None = None,
 ) -> list[list[TimelineEntry]]:
     blocks: list[list[TimelineEntry]] = []
     current: list[TimelineEntry] = []
     skipped_before_first = 0
 
     for line in lines[start_index:]:
-        entry = parse_timeline_line(line)
+        entry = parse_timeline_line(line, duration_seconds=duration_seconds)
         if entry is not None:
             current.append(entry)
             skipped_before_first = 0
@@ -402,17 +440,26 @@ def parse_timeline_blocks(
                 break
             continue
 
-        blocks.append(current)
-        if stop_after_first:
-            return blocks
-        current = []
+        # A blank line, MC paragraph, or decoration is not a reliable block
+        # boundary. Keep collecting later timestamped songs from the same
+        # comment so "singing -> talk -> singing" timelines remain intact.
 
     if current:
         blocks.append(current)
     return blocks
 
 
-def parse_timeline_line(line: str) -> TimelineEntry | None:
+def normalize_timeline_entries(entries: list[TimelineEntry]) -> list[TimelineEntry]:
+    unique: dict[tuple[int, str], TimelineEntry] = {}
+    for entry in entries:
+        unique.setdefault((entry.seconds, entry.normalized_song_title), entry)
+    return sorted(unique.values(), key=lambda entry: (entry.seconds, entry.timestamp_text))
+
+
+def parse_timeline_line(
+    line: str,
+    duration_seconds: int | None = None,
+) -> TimelineEntry | None:
     match = LINE_RE.match(line)
     if not match:
         return None
@@ -428,6 +475,8 @@ def parse_timeline_line(line: str) -> TimelineEntry | None:
     try:
         seconds = timestamp_to_seconds(timestamp_text)
     except ValueError:
+        return None
+    if duration_seconds is not None and duration_seconds > 0 and seconds > duration_seconds:
         return None
 
     return TimelineEntry(

@@ -38,14 +38,22 @@
             <input name="max_comments" type="number" min="1" value="{{ default_max_comments }}">
           </label>
         </div>
+        <label>
+          <span>索引模式</span>
+          <select name="mode">
+            <option value="incremental" selected>增量更新：扫描最新上传，失败条目自动重试</option>
+            <option value="backfill">历史回填：从上次中断位置继续</option>
+            <option value="full">扫描最新上传：只跳过已完成条目</option>
+          </select>
+        </label>
         <div class="check-row">
           <label>
             <input name="include_all" type="checkbox">
             <span>不按歌回标题过滤</span>
           </label>
           <label>
-            <input name="incremental" type="checkbox" checked>
-            <span>增量更新（遇到数据库已有视频即停止）</span>
+            <input name="reset_backfill" type="checkbox">
+            <span>重置历史回填进度</span>
           </label>
         </div>
         <button id="start-button" type="submit">开始索引</button>
@@ -59,6 +67,7 @@
           <div><dt>已扫描视频</dt><dd id="videos-seen">0</dd></div>
           <div><dt>已索引视频</dt><dd id="videos-indexed">0</dd></div>
           <div><dt>跳过视频</dt><dd id="videos-skipped">0</dd></div>
+          <div><dt>失败待重试</dt><dd id="videos-failed">0</dd></div>
           <div><dt>扫描评论</dt><dd id="comments-seen">0</dd></div>
           <div><dt>时间轴评论</dt><dd id="timeline-comments">0</dd></div>
           <div><dt>新增时间点</dt><dd id="entries-inserted">0</dd></div>
@@ -79,6 +88,7 @@
           videos_seen: document.querySelector("#videos-seen"),
           videos_indexed: document.querySelector("#videos-indexed"),
           videos_skipped: document.querySelector("#videos-skipped"),
+          videos_failed: document.querySelector("#videos-failed"),
           comments_seen: document.querySelector("#comments-seen"),
           timeline_comments: document.querySelector("#timeline-comments"),
           entries_inserted: document.querySelector("#entries-inserted")

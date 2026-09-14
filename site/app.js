@@ -2,9 +2,12 @@
   const pageSize = 20;
   const entryPageSize = 10;
   const state = {
-    catalog: null,
+    overview: null,
     page: 1,
+    pageCount: 1,
+    total: 0,
     matches: [],
+    requestId: 0,
   };
 
   const elements = {
@@ -25,6 +28,8 @@
     resultSummary: document.querySelector("#result-summary"),
     resultsList: document.querySelector("#results-list"),
     resultsEmpty: document.querySelector("#results-empty"),
+    resultsEmptyTitle: document.querySelector("#results-empty h3"),
+    resultsEmptyText: document.querySelector("#results-empty p"),
     resultsPager: document.querySelector("#results-pager"),
     resultsPrev: document.querySelector("#results-prev"),
     resultsNext: document.querySelector("#results-next"),
@@ -33,7 +38,6 @@
   };
 
   const text = (value) => String(value ?? "");
-  const normalized = (value) => text(value).trim().toLocaleLowerCase();
   const formatNumber = (value) => new Intl.NumberFormat("zh-CN").format(Number(value || 0));
   const formatDate = (value) => {
     if (!value) return "日期未知";
@@ -61,7 +65,7 @@
   function setQueries(queries, replace = false) {
     const params = new URLSearchParams();
     ["channel", "song", "artist"].forEach((key) => {
-      if (queries[key].trim()) params.set(key, queries[key].trim());
+      if (text(queries[key]).trim()) params.set(key, text(queries[key]).trim());
     });
     const url = params.toString() ? `${window.location.pathname}?${params}` : window.location.pathname;
     window.history[replace ? "replaceState" : "pushState"]({}, "", url);
@@ -75,18 +79,18 @@
   }
 
   function renderStats() {
-    const stats = state.catalog.stats || {};
+    const stats = state.overview?.stats || {};
     elements.statsSummary.textContent = `共 ${formatNumber(stats.channels)} 个频道 · ${formatNumber(stats.videos)} 个视频 · ${formatNumber(stats.songs)} 首歌曲 · ${formatNumber(stats.entries)} 个时间点`;
     elements.dataStatus.textContent = `${formatNumber(stats.entries)} 个时间点已就绪`;
-    const generatedAt = state.catalog.generatedAt ? new Date(state.catalog.generatedAt) : null;
-    if (generatedAt && !Number.isNaN(generatedAt.getTime())) {
-      elements.updatedAt.textContent = `数据快照 ${new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" }).format(generatedAt)}`;
+    const updatedAt = state.overview?.updatedAt ? new Date(state.overview.updatedAt) : null;
+    if (updatedAt && !Number.isNaN(updatedAt.getTime())) {
+      elements.updatedAt.textContent = `数据库更新于 ${new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" }).format(updatedAt)}`;
     }
   }
 
   function renderChannels() {
     elements.channelGrid.replaceChildren();
-    state.catalog.channels.forEach((channel) => {
+    (state.overview?.channels || []).forEach((channel) => {
       const link = createElement("a", "channel-card");
       const accent = createElement("span", "channel-accent", "◒");
       const body = createElement("span", "channel-card-body");
@@ -97,19 +101,6 @@
       link.href = `?channel=${encodeURIComponent(channel.channel_title)}`;
       elements.channelGrid.append(link);
     });
-  }
-
-  function matchesGroup(group, queries) {
-    const channelQuery = normalized(queries.channel);
-    const songQuery = normalized(queries.song);
-    const artistQuery = normalized(queries.artist);
-    if (channelQuery) {
-      const matchesChannel = group.channels.some((channel) => normalized(channel.title).includes(channelQuery) || normalized(channel.id) === channelQuery);
-      if (!matchesChannel) return false;
-    }
-    if (songQuery && !normalized(group.titleSearchText || group.songTitle).includes(songQuery)) return false;
-    if (artistQuery && !normalized(group.artistSearchText || group.artist).includes(artistQuery)) return false;
-    return true;
   }
 
   function makeEntryPager(entries) {
@@ -172,43 +163,82 @@
     summary.append(icon, main, artist, chevron);
 
     const body = createElement("div", "song-body");
-    group.channels.forEach((channel) => {
+    (group.channels || []).forEach((channel) => {
       const channelBlock = createElement("details", "channel-block");
       channelBlock.open = group.channels.length === 1;
       const channelSummary = createElement("summary", "channel-summary");
       channelSummary.append(createElement("span", "channel-chevron", "›"));
       channelSummary.append(createElement("strong", "channel-name", channel.title));
       channelSummary.append(createElement("span", "channel-entry-count", `${formatNumber(channel.entries.length)} 个时间点`));
-      channelBlock.append(channelSummary, makeEntryPager(channel.entries));
+      channelBlock.append(channelSummary, makeEntryPager(channel.entries || []));
       body.append(channelBlock);
     });
     details.append(summary, body);
     return details;
   }
 
-  function renderResults(queries) {
-    state.matches = state.catalog.groups.filter((group) => matchesGroup(group, queries));
-    const totalPages = Math.max(1, Math.ceil(state.matches.length / pageSize));
-    state.page = Math.min(state.page, totalPages);
-    const start = (state.page - 1) * pageSize;
-    const visibleGroups = state.matches.slice(start, start + pageSize);
-    elements.resultsList.replaceChildren();
-    visibleGroups.forEach((group) => elements.resultsList.append(renderGroup(group, state.matches.length === 1)));
-    elements.resultSummary.textContent = state.matches.length ? `${formatNumber(state.matches.length)} 首匹配歌曲` : "没有匹配歌曲";
-    elements.resultsEmpty.hidden = state.matches.length !== 0;
-    elements.resultsPager.hidden = state.matches.length <= pageSize;
-    elements.resultsPrev.disabled = state.page === 1;
-    elements.resultsNext.disabled = state.page >= totalPages;
-    elements.resultsPageLabel.textContent = `第 ${state.page} / ${totalPages} 页`;
+  function setEmptyState(title, message, hidden) {
+    elements.resultsEmptyTitle.textContent = title;
+    elements.resultsEmptyText.textContent = message;
+    elements.resultsEmpty.hidden = hidden;
   }
 
-  function render() {
+  function renderResults() {
+    elements.resultsList.replaceChildren();
+    state.matches.forEach((group) => elements.resultsList.append(renderGroup(group, state.total === 1)));
+    elements.resultSummary.textContent = state.total ? `${formatNumber(state.total)} 首匹配歌曲` : "没有匹配歌曲";
+    setEmptyState("没有找到匹配条目", "可以换一种歌曲或作者写法，或者先清除一个筛选条件。", state.total !== 0);
+    elements.resultsPager.hidden = state.total === 0 || state.pageCount <= 1;
+    elements.resultsPrev.disabled = state.page <= 1;
+    elements.resultsNext.disabled = state.page >= state.pageCount;
+    elements.resultsPageLabel.textContent = `第 ${state.page} / ${state.pageCount} 页`;
+  }
+
+  async function requestJson(url) {
+    const response = await fetch(url, { cache: "no-store", headers: { Accept: "application/json" } });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.message || `请求失败（${response.status}）`);
+    return payload;
+  }
+
+  async function refreshResults(queries) {
+    const requestId = ++state.requestId;
+    const params = new URLSearchParams();
+    Object.entries(queries).forEach(([key, value]) => {
+      if (value.trim()) params.set(key, value.trim());
+    });
+    params.set("page", String(state.page));
+    params.set("pageSize", String(pageSize));
+    elements.resultSummary.textContent = "正在查询数据库…";
+    elements.resultsList.replaceChildren();
+    setEmptyState("正在查询", "正在从实时数据库读取歌曲和时间点。", false);
+    elements.resultsPager.hidden = true;
+    try {
+      const payload = await requestJson(`/api/search?${params}`);
+      if (requestId !== state.requestId) return;
+      state.matches = Array.isArray(payload.groups) ? payload.groups : [];
+      state.page = Math.max(1, Number(payload.page || state.page));
+      state.pageCount = Math.max(1, Number(payload.pageCount || 1));
+      state.total = Math.max(0, Number(payload.total || 0));
+      renderResults();
+    } catch (error) {
+      if (requestId !== state.requestId) return;
+      console.error(error);
+      state.matches = [];
+      state.total = 0;
+      state.pageCount = 1;
+      elements.resultSummary.textContent = "查询失败";
+      setEmptyState("数据库暂时无法查询", "请稍后重试；如果问题持续存在，请刷新页面。", false);
+    }
+  }
+
+  async function render() {
     const queries = getQueries();
     renderSearchInputs(queries);
     const hasSearch = Object.values(queries).some((value) => value.trim());
     elements.homeView.hidden = hasSearch;
     elements.resultsView.hidden = !hasSearch;
-    if (hasSearch) renderResults(queries);
+    if (hasSearch) await refreshResults(queries);
   }
 
   function showLoadedState() {
@@ -217,15 +247,17 @@
     elements.content.hidden = false;
     renderStats();
     renderChannels();
-    render();
   }
 
-  async function loadCatalog() {
+  async function loadOverview() {
+    elements.loading.hidden = false;
+    elements.error.hidden = true;
+    elements.content.hidden = true;
+    elements.dataStatus.textContent = "载入数据库中";
     try {
-      const response = await fetch("./catalog.json", { cache: "no-store" });
-      if (!response.ok) throw new Error(`catalog ${response.status}`);
-      state.catalog = await response.json();
+      state.overview = await requestJson("/api/overview");
       showLoadedState();
+      await render();
     } catch (error) {
       console.error(error);
       elements.loading.hidden = true;
@@ -243,41 +275,40 @@
       song: elements.songInput.value,
       artist: elements.artistInput.value,
     });
-    render();
+    void render();
   });
   elements.clearSearch.addEventListener("click", () => {
     state.page = 1;
     setQueries({ channel: "", song: "", artist: "" });
-    render();
+    void render();
     elements.channelInput.focus();
   });
   elements.resultsPrev.addEventListener("click", () => {
     if (state.page > 1) {
       state.page -= 1;
-      renderResults(getQueries());
+      void refreshResults(getQueries());
       window.scrollTo({ top: elements.resultsView.offsetTop - 24, behavior: "smooth" });
     }
   });
   elements.resultsNext.addEventListener("click", () => {
-    const totalPages = Math.ceil(state.matches.length / pageSize);
-    if (state.page < totalPages) {
+    if (state.page < state.pageCount) {
       state.page += 1;
-      renderResults(getQueries());
+      void refreshResults(getQueries());
       window.scrollTo({ top: elements.resultsView.offsetTop - 24, behavior: "smooth" });
     }
   });
   window.addEventListener("popstate", () => {
     state.page = 1;
-    render();
+    void render();
   });
-  elements.retryButton.addEventListener("click", loadCatalog);
+  elements.retryButton.addEventListener("click", () => void loadOverview());
 
   if (typeof document.modelContext?.registerTool === "function") {
     const lifecycle = new AbortController();
     Promise.resolve(document.modelContext.registerTool({
       name: "search_vtuber_songs",
       title: "Search VTuber songs",
-      description: "Search the visible VTuber Song Finder catalog by channel, song title, or artist and update the page to show matching songs.",
+      description: "Search the live VTuber Song Finder database by channel, song title, or artist and update the page to show matching songs.",
       inputSchema: {
         type: "object",
         properties: {
@@ -288,8 +319,8 @@
         additionalProperties: false,
       },
       annotations: { readOnlyHint: true, untrustedContentHint: true },
-      execute(input) {
-        if (!state.catalog) return { ok: false, message: "The catalog is still loading." };
+      async execute(input) {
+        if (!state.overview) return { ok: false, message: "The database is still loading." };
         const value = input && typeof input === "object" ? input : {};
         const queries = {
           channel: text(value.channel),
@@ -298,11 +329,11 @@
         };
         state.page = 1;
         setQueries(queries);
-        render();
+        await render();
         return {
           ok: true,
-          matchCount: state.matches.length,
-          page: 1,
+          matchCount: state.total,
+          page: state.page,
           query: queries,
           songs: state.matches.slice(0, 5).map((group) => ({ title: group.songTitle, artist: group.artist, entryCount: group.entryCount })),
         };
@@ -311,5 +342,5 @@
     window.addEventListener("pagehide", () => lifecycle.abort(), { once: true });
   }
 
-  loadCatalog();
+  void loadOverview();
 })();

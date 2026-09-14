@@ -123,13 +123,21 @@ http://127.0.0.1:5000
 
 ### Sites 网页版
 
-仓库中的 `dist/` 是可部署的只读网页版本，使用当前 SQLite 数据库生成检索索引：
+仓库中的 `site/` 和 `worker/` 组成可部署的网页版本。Sites 会创建并绑定 D1 数据库，网页通过 Worker API 实时查询歌曲、频道和时间点；部署包中的 `drizzle/` 只保存表结构迁移，不包含大批量数据：
 
 ```powershell
-python scripts/export_catalog.py
+npm install
+npm run db:generate
+npm run build
 ```
 
-网页版本保留歌曲、频道、艺人和 YouTube 时间点检索；YouTube API Key、数据库写入和频道索引仍由本地版负责。
+从现有本地 SQLite 导出 D1 初始数据：
+
+```powershell
+python scripts/export_d1_seed.py
+```
+
+首次部署后由受保护的导入接口分批写入 `build/d1-seed/` 中的 JSON 数据。网页版本保留歌曲、频道、艺人和 YouTube 时间点检索；YouTube API Key、数据库写入和频道索引仍由本地版负责。站点当前保留为私有访问。
 
 搜索规则：
 
@@ -188,6 +196,15 @@ vtuber_song_finder/
 ├── search.py
 ├── song_identity.py
 ├── config.py
+├── db/
+│   └── schema.ts
+├── drizzle/
+├── site/
+├── worker/
+├── scripts/
+    ├── build-worker.mjs
+    ├── export_d1_seed.py
+    └── validate-worker.mjs
 ├── templates/
 │   └── index.html
 └── static/

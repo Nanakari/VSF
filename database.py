@@ -329,6 +329,7 @@ class SongDatabase:
         cursor = self.conn.execute(
             f"""
             SELECT
+                song_entries.id AS entry_id,
                 songs.id AS song_id,
                 songs.canonical_song_title,
                 songs.normalized_song_title,
@@ -1204,5 +1205,4 @@ def looks_like_count_marker(title: str) -> bool:
     if "\u4eba" in compact and any(char.isdigit() for char in compact):
         return True
     return False
-
 

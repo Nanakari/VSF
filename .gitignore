@@ -7,19 +7,21 @@ __pycache__/
 .coverage
 htmlcov/
 .playwright-cli/
+node_modules/
 
 build/
 dist/
 logs/
 
-# Static Site output is the deployable artifact; keep unrelated local binaries out.
+# Worker Site output is the deployable artifact; keep unrelated generated files out.
 !dist/
 dist/*
-!dist/index.html
-!dist/styles.css
-!dist/app.js
-!dist/favicon.svg
-!dist/catalog.json
+!dist/server/
+!dist/server/index.js
+!dist/.openai/
+!dist/.openai/hosting.json
+!dist/.openai/drizzle/
+!dist/.openai/drizzle/**
 
 *.log
 flask_stdout.log

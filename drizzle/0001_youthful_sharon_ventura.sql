@@ -1,0 +1,1 @@
+ALTER TABLE `song_entries` ADD `group_key` text NOT NULL REFERENCES song_groups(group_key);

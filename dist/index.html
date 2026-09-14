@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#080d19">
+    <meta name="description" content="从 VTuber 歌回时间轴中检索歌曲、艺人和 YouTube 时间点。">
+    <title>VTuber Song Finder</title>
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg">
+    <link rel="stylesheet" href="./styles.css">
+    <script src="./app.js" defer></script>
+  </head>
+  <body>
+    <div class="ambient ambient-a" aria-hidden="true"></div>
+    <div class="ambient ambient-b" aria-hidden="true"></div>
+    <main class="shell">
+      <header class="topbar">
+        <a class="brand" href="./" aria-label="回到首页">
+          <span class="brand-mark" aria-hidden="true">VSF</span>
+          <span>
+            <span class="brand-name">VTuber Song Finder</span>
+            <span class="brand-note">歌回时间轴检索库</span>
+          </span>
+        </a>
+        <div class="topbar-side">
+          <span class="data-status"><span class="status-dot" aria-hidden="true"></span><span id="data-status">载入数据中</span></span>
+        </div>
+      </header>
+
+      <section class="search-panel" aria-labelledby="search-title">
+        <div class="search-panel-heading">
+          <div>
+            <p class="eyebrow">SEARCH THE ARCHIVE</p>
+            <h1 id="search-title">找到那首歌出现的时间点</h1>
+          </div>
+          <p class="search-help">按频道、歌曲或艺人组合检索，打开后会直接跳到 YouTube 对应时间。</p>
+        </div>
+        <form id="search-form" class="searchbar">
+          <label class="field field-channel">
+            <span>频道</span>
+            <input id="channel-input" name="channel" autocomplete="off" placeholder="Shairu / MunMosh">
+          </label>
+          <label class="field field-song">
+            <span>歌曲</span>
+            <input id="song-input" name="song" autocomplete="off" placeholder="KING / 怪物 / Stellar Stellar">
+          </label>
+          <label class="field field-artist">
+            <span>艺人 / 作者</span>
+            <input id="artist-input" name="artist" autocomplete="off" placeholder="YOASOBI / Ado / 米津玄師">
+          </label>
+          <button class="search-button" type="submit"><span>搜索</span><span class="button-arrow" aria-hidden="true">↗</span></button>
+        </form>
+        <div class="quick-row">
+          <span id="stats-summary">准备载入数据库统计…</span>
+          <button id="clear-search" class="clear-button" type="button" hidden>清除条件</button>
+        </div>
+      </section>
+
+      <section id="loading-state" class="state-card" aria-live="polite">
+        <span class="loading-orb" aria-hidden="true"></span>
+        <div><strong>正在载入歌单索引</strong><span>很快就好。</span></div>
+      </section>
+
+      <section id="error-state" class="state-card state-error" aria-live="polite" hidden>
+        <div><strong>数据暂时无法载入</strong><span>请刷新页面后再试。</span></div>
+        <button id="retry-button" class="secondary-button" type="button">重新载入</button>
+      </section>
+
+      <div id="content" hidden>
+        <section id="home-view" class="content-section" aria-labelledby="channels-title">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">CHANNELS</p>
+              <h2 id="channels-title">按频道浏览</h2>
+            </div>
+            <span class="section-note">选择一个频道，直接查看它的歌曲目录</span>
+          </div>
+          <div id="channel-grid" class="channel-grid"></div>
+        </section>
+
+        <section id="results-view" class="content-section" aria-labelledby="results-title" hidden>
+          <div class="section-heading results-heading">
+            <div>
+              <p class="eyebrow">MATCHES</p>
+              <h2 id="results-title">搜索结果</h2>
+            </div>
+            <span id="result-summary" class="section-note"></span>
+          </div>
+          <div id="results-list" class="results-list" aria-live="polite"></div>
+          <div id="results-empty" class="empty-state" hidden>
+            <span class="empty-glyph" aria-hidden="true">⌕</span>
+            <h3>没有找到匹配条目</h3>
+            <p>可以换一种歌曲或作者写法，或者先清除一个筛选条件。</p>
+          </div>
+          <nav id="results-pager" class="pager" aria-label="搜索结果分页" hidden>
+            <button id="results-prev" class="pager-button" type="button">← 上一页</button>
+            <span id="results-page-label"></span>
+            <button id="results-next" class="pager-button" type="button">下一页 →</button>
+          </nav>
+        </section>
+      </div>
+
+      <footer class="footer">
+        <span>时间点来自公开视频评论区中的歌单与时间轴。</span>
+        <span id="updated-at"></span>
+      </footer>
+    </main>
+  </body>
+</html>

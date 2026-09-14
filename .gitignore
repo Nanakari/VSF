@@ -6,10 +6,20 @@ __pycache__/
 .mypy_cache/
 .coverage
 htmlcov/
+.playwright-cli/
 
 build/
 dist/
 logs/
+
+# Static Site output is the deployable artifact; keep unrelated local binaries out.
+!dist/
+dist/*
+!dist/index.html
+!dist/styles.css
+!dist/app.js
+!dist/favicon.svg
+!dist/catalog.json
 
 *.log
 flask_stdout.log

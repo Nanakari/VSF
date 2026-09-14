@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+from datetime import datetime, timezone
 from pathlib import Path
 import sys
 
@@ -131,21 +133,41 @@ def export_seed() -> None:
         path.write_text(json.dumps(rows, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
         print(f"{name}: {len(rows)} rows -> {path}")
 
-    write("channels", channels)
-    write("videos", videos)
-    write("song_groups", group_rows)
-    write("songs", song_rows)
-    write(
-        "song_entries",
-        [
-            {
-                **row,
-                "group_key": entry_to_group[int(row["id"])],
-            }
-            for row in entries
-        ],
+    seed_entries = [
+        {
+            **row,
+            "group_key": entry_to_group[int(row["id"])],
+        }
+        for row in entries
+    ]
+    seed_tables = {
+        "channels": channels,
+        "videos": videos,
+        "song_groups": group_rows,
+        "songs": song_rows,
+        "song_entries": seed_entries,
+    }
+    for name in ("channels", "videos", "song_groups", "songs", "song_entries"):
+        write(name, seed_tables[name])
+
+    version_payload = json.dumps(
+        seed_tables,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    version = hashlib.sha256(version_payload).hexdigest()[:24]
+    manifest = {
+        "version": version,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "tables": {name: len(rows) for name, rows in seed_tables.items()},
+    }
+    (OUTPUT_DIR / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2),
+        encoding="utf-8",
     )
     print(f"Exported {len(group_rows)} groups and {len(entries)} entries.")
+    print(f"Snapshot version: {version}")
 
 
 if __name__ == "__main__":

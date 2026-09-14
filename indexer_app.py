@@ -223,10 +223,11 @@ def run_index_job(
     mode: str,
     reset_backfill: bool,
 ) -> None:
-    db = SongDatabase(get_database_path())
-    db.init_schema()
+    db: SongDatabase | None = None
     stats = IndexStats()
     try:
+        db = SongDatabase(get_database_path())
+        db.init_schema()
         client = YouTubeClient(api_key)
         stats = run_index_channel(
             db=db,
@@ -250,7 +251,8 @@ def run_index_job(
         logger.exception("Indexer job failed")
         finish_job(False, f"索引失败：{exc}", stats)
     finally:
-        db.close()
+        if db is not None:
+            db.close()
 
 
 def reset_job_state() -> None:

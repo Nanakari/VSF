@@ -149,7 +149,13 @@ npm run build
 python scripts/export_d1_seed.py
 ```
 
-首次部署后由受保护的导入接口分批写入 `build/d1-seed/` 中的 JSON 数据。网页版本保留歌曲、频道、艺人和 YouTube 时间点检索；YouTube API Key、数据库写入和频道索引仍由本地版负责。站点当前保留为私有访问。
+首次部署或本地数据发生清理、重建后，用快照导入替换线上数据。导入过程先写入临时表，最后一次性切换；如果中途失败，线上仍保留旧快照：
+
+```powershell
+python scripts/import_d1_snapshot.py --base-url "https://你的站点地址" --token "$env:SEED_TOKEN"
+```
+
+脚本会读取 `build/d1-seed/manifest.json` 的数据版本，避免重复导入留下已删除的旧记录。网页端搜索结果分页，歌曲详情时间点也通过服务端分页接口按需加载；YouTube API Key、数据库写入和频道索引仍由本地版负责。站点当前保留为私有访问。
 
 搜索规则：
 

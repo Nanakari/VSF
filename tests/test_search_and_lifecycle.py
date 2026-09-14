@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import app as search_app
 import indexer_app
@@ -83,6 +84,31 @@ class SearchAndLifecycleTests(unittest.TestCase):
         finally:
             with indexer_app.job_lock:
                 indexer_app.job_state["running"] = previous
+
+    def test_indexer_initialization_failure_marks_job_finished(self):
+        class BrokenDatabase:
+            def __init__(self, _path):
+                pass
+
+            def init_schema(self):
+                raise RuntimeError("数据库初始化失败")
+
+            def close(self):
+                pass
+
+        indexer_app.reset_job_state()
+        with indexer_app.job_lock:
+            indexer_app.job_state["running"] = True
+        try:
+            with patch.object(indexer_app, "SongDatabase", BrokenDatabase):
+                indexer_app.run_index_job("key", "channel", 1, 1, False, "incremental", False)
+            with indexer_app.job_lock:
+                self.assertFalse(indexer_app.job_state["running"])
+                self.assertTrue(indexer_app.job_state["done"])
+                self.assertFalse(indexer_app.job_state["ok"])
+                self.assertIn("数据库初始化失败", indexer_app.job_state["message"])
+        finally:
+            indexer_app.reset_job_state()
 
 
 if __name__ == "__main__":

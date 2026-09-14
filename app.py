@@ -20,7 +20,6 @@ from database import SongDatabase
 
 
 PAGE_SIZE = 20
-CLIENT_STALE_SECONDS = 12
 SHUTDOWN_DELAY_SECONDS = 3
 AUTO_EXIT_ENABLED = bool(getattr(sys, "frozen", False))
 SCHEMA_LOCK = threading.Lock()
@@ -281,27 +280,17 @@ def get_client_id() -> str:
 def register_client(client_id: str) -> None:
     with active_clients_lock:
         active_clients[client_id] = time.monotonic()
-        prune_clients_locked()
     schedule_shutdown_check()
 
 
 def unregister_client(client_id: str) -> None:
     with active_clients_lock:
         active_clients.pop(client_id, None)
-        prune_clients_locked()
     schedule_shutdown_check()
-
-
-def prune_clients_locked() -> None:
-    cutoff = time.monotonic() - CLIENT_STALE_SECONDS
-    stale = [client_id for client_id, last_seen in active_clients.items() if last_seen < cutoff]
-    for client_id in stale:
-        active_clients.pop(client_id, None)
 
 
 def has_active_clients() -> bool:
     with active_clients_lock:
-        prune_clients_locked()
         return bool(active_clients)
 
 
@@ -375,6 +364,5 @@ if __name__ == "__main__":
     except Exception:
         logger.exception("Failed to start VTuber Song Finder")
         raise
-
 
 

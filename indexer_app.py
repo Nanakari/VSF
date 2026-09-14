@@ -28,7 +28,6 @@ from youtube_client import (
 DEFAULT_MAX_VIDEOS = 1000
 DEFAULT_MAX_COMMENTS = 100
 SETUP_PORT = 5001
-CLIENT_STALE_SECONDS = 12
 SHUTDOWN_DELAY_SECONDS = 3
 AUTO_EXIT_ENABLED = bool(getattr(sys, "frozen", False))
 
@@ -166,7 +165,6 @@ def client_ping():
     if client_id:
         with active_clients_lock:
             active_clients[client_id] = time.monotonic()
-            prune_clients_locked()
         schedule_shutdown_check()
     return ("", 204)
 
@@ -177,7 +175,6 @@ def client_close():
     if client_id:
         with active_clients_lock:
             active_clients.pop(client_id, None)
-            prune_clients_locked()
     schedule_shutdown_check()
     return ("", 204)
 
@@ -185,6 +182,9 @@ def client_close():
 
 @app.post("/shutdown")
 def shutdown():
+    if is_index_job_running():
+        logger.warning("Ignoring shutdown request while an index job is running")
+        return jsonify({"ok": False, "message": "索引任务正在运行，任务完成后才能退出。"}), 409
     logger.info("Browser requested VTuber Song Finder Setup shutdown")
     threading.Timer(1.5, force_shutdown).start()
     return jsonify({"ok": True})
@@ -201,6 +201,8 @@ def launcher():
 
 @app.get("/shutdown-close")
 def shutdown_close():
+    if is_index_job_running():
+        return Response("索引任务正在运行，任务完成后才能退出。", status=409, mimetype="text/plain")
     logger.info("Browser requested VTuber Song Finder Setup shutdown page")
     threading.Timer(1.0, force_shutdown).start()
     return Response(make_close_page("VTuber Song Finder Setup"), mimetype="text/html")
@@ -383,17 +385,14 @@ def get_client_id() -> str:
     return str(data.get("client_id") or request.form.get("client_id") or "").strip()
 
 
-def prune_clients_locked() -> None:
-    cutoff = time.monotonic() - CLIENT_STALE_SECONDS
-    stale = [client_id for client_id, last_seen in active_clients.items() if last_seen < cutoff]
-    for client_id in stale:
-        active_clients.pop(client_id, None)
-
-
 def has_active_clients() -> bool:
     with active_clients_lock:
-        prune_clients_locked()
         return bool(active_clients)
+
+
+def is_index_job_running() -> bool:
+    with job_lock:
+        return bool(job_state["running"])
 
 
 def schedule_shutdown_check() -> None:
@@ -413,6 +412,9 @@ def shutdown_if_still_idle() -> None:
     if not AUTO_EXIT_ENABLED:
         return
     shutdown_timer = None
+    if is_index_job_running():
+        schedule_shutdown_check()
+        return
     if has_active_clients():
         schedule_shutdown_check()
         return
@@ -455,6 +457,10 @@ def make_close_page(title: str) -> str:
 </html>"""
 
 def force_shutdown() -> None:
+    if is_index_job_running():
+        logger.warning("Refusing to terminate while an index job is running")
+        schedule_shutdown_check()
+        return
     logger.info("Exiting VTuber Song Finder Setup by browser request")
     os._exit(0)
 

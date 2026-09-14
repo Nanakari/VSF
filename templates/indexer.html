@@ -125,12 +125,18 @@
           const shutdownUrl = "{{ url_for('shutdown') }}";
           const closeUrl = "{{ url_for('shutdown_close') }}";
           try {
-            if (navigator.sendBeacon) {
-              navigator.sendBeacon(shutdownUrl);
-            } else {
-              fetch(shutdownUrl, { method: "POST", keepalive: true }).catch(() => {});
+            const response = await fetch(shutdownUrl, { method: "POST" });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+              message.textContent = data.message || "索引任务正在运行，暂时不能退出。";
+              exitButton.disabled = false;
+              return;
             }
-          } catch (_) {}
+          } catch (_) {
+            message.textContent = "无法确认索引服务状态，请不要关闭窗口，稍后重试。";
+            exitButton.disabled = false;
+            return;
+          }
           window.open("", "_self");
           window.close();
           setTimeout(() => { window.location.href = closeUrl; }, 300);

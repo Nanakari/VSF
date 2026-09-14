@@ -347,6 +347,16 @@ class SongDatabase:
         entries: Iterable[TimelineEntry],
         source_comment: str,
     ) -> int:
+        inserted = self._insert_song_entries(video_id, entries, source_comment)
+        self.conn.commit()
+        return inserted
+
+    def _insert_song_entries(
+        self,
+        video_id: str,
+        entries: Iterable[TimelineEntry],
+        source_comment: str,
+    ) -> int:
         channel_id = self._get_video_channel_id(video_id)
         inserted = 0
         for entry in entries:
@@ -392,7 +402,6 @@ class SongDatabase:
                     """,
                     (song_id, video_id, entry.seconds, entry.normalized_song_title),
                 )
-        self.conn.commit()
         return inserted
 
     def replace_song_entries_for_video(
@@ -401,10 +410,12 @@ class SongDatabase:
         entries: Iterable[TimelineEntry],
         source_comment: str,
     ) -> int:
-        self.conn.execute("DELETE FROM song_entries WHERE video_id = ?", (video_id,))
-        self._delete_orphan_songs()
-        self.conn.commit()
-        return self.insert_song_entries(video_id, entries, source_comment)
+        # Keep deletion, orphan cleanup, and insertion in one transaction. If
+        # parsing or an INSERT fails, the previous timeline remains intact.
+        with self.conn:
+            self.conn.execute("DELETE FROM song_entries WHERE video_id = ?", (video_id,))
+            self._delete_orphan_songs()
+            return self._insert_song_entries(video_id, entries, source_comment)
 
     def rebuild_best_timeline_comments(self) -> dict[str, int]:
         rows = self.conn.execute(
@@ -566,15 +577,6 @@ class SongDatabase:
         normalized_query = normalize_song_title(song_query or "")
         query_key = compact_key(song_query or "")
         artist_query = (artist_query or "").strip()
-        if channel_query and not normalized_query and not artist_query:
-            quick_groups = self.search_channel_groups(
-                channel_query=channel_query,
-                limit=limit,
-                offset=offset,
-            )
-            if quick_groups is not None:
-                return quick_groups
-
         rows = self.search_entries(
             song_query=None if normalized_query else song_query,
             channel_query=channel_query,
@@ -673,105 +675,17 @@ class SongDatabase:
         channel_query: str,
         limit: int = 50,
         offset: int = 0,
-    ) -> list[dict[str, object]] | None:
-        channel = self.resolve_channel(channel_query)
-        if channel is None:
-            return []
+    ) -> list[dict[str, object]]:
+        """Compatibility wrapper using the same path as combined searches.
 
-        song_rows = self.conn.execute(
-            """
-            SELECT
-                songs.id AS song_id,
-                songs.channel_id,
-                channels.channel_title,
-                songs.canonical_song_title,
-                songs.normalized_song_title,
-                COUNT(song_entries.id) AS entry_count,
-                MAX(videos.published_at) AS latest_published_at
-            FROM songs
-            JOIN channels ON channels.channel_id = songs.channel_id
-            LEFT JOIN song_entries ON song_entries.song_id = songs.id
-            LEFT JOIN videos ON videos.video_id = song_entries.video_id
-            WHERE songs.channel_id = ?
-            GROUP BY songs.id
-            ORDER BY
-                entry_count DESC,
-                latest_published_at DESC,
-                songs.normalized_song_title
-            LIMIT ? OFFSET ?
-            """,
-            (channel["channel_id"], limit, offset),
-        ).fetchall()
-        if not song_rows:
-            return []
-
-        song_ids = [int(row["song_id"]) for row in song_rows]
-        placeholders = ",".join("?" for _ in song_ids)
-        entry_rows = self.conn.execute(
-            f"""
-            SELECT
-                songs.id AS song_id,
-                songs.canonical_song_title,
-                songs.normalized_song_title,
-                song_entries.raw_song_title,
-                song_entries.timestamp_text,
-                song_entries.seconds,
-                song_entries.jump_url,
-                videos.video_id,
-                videos.title AS video_title,
-                videos.published_at,
-                channels.channel_id,
-                channels.channel_title
-            FROM song_entries
-            JOIN songs ON songs.id = song_entries.song_id
-            JOIN videos ON videos.video_id = song_entries.video_id
-            JOIN channels ON channels.channel_id = videos.channel_id
-            WHERE song_entries.song_id IN ({placeholders})
-            ORDER BY videos.published_at DESC, song_entries.seconds ASC
-            """,
-            tuple(song_ids),
-        ).fetchall()
-
-        groups_by_id: dict[int, dict[str, object]] = {}
-        for row in song_rows:
-            parsed = parse_song_identity(row["canonical_song_title"])
-            song_id = int(row["song_id"])
-            groups_by_id[song_id] = {
-                "channel_id": row["channel_id"],
-                "channel_title": row["channel_title"],
-                "song_key": compact_key(canonical_song_title_for_merge(parsed.song_title)),
-                "artist_key": parsed.artist_group_key,
-                "artist_keys": set(parsed.artist_keys),
-                "title_keys": set(),
-                "song_title": "",
-                "artist": "",
-                "normalized_song_title": row["normalized_song_title"],
-                "raw_titles": [row["canonical_song_title"]],
-                "entries": [],
-            }
-
-        for row in entry_rows:
-            song_id = int(row["song_id"])
-            group = groups_by_id.get(song_id)
-            if group is None:
-                continue
-            group["entries"].append(dict(row))
-            group["raw_titles"].append(row["raw_song_title"])
-
-        groups = [groups_by_id[song_id] for song_id in song_ids]
-        for group in groups:
-            raw_titles = group.pop("raw_titles")
-            group["song_title"] = choose_display_title(raw_titles)
-            group["artist"] = choose_display_artist(raw_titles)
-            group["entries"].sort(
-                key=lambda entry: (
-                    entry.get("published_at") or "",
-                    entry.get("seconds") or 0,
-                ),
-                reverse=True,
-            )
-            group["channels"] = make_channel_groups(group["entries"])
-        return groups
+        Channel-only searches must use the same channel matching, song identity,
+        merging, sorting, and pagination rules as searches with a song query.
+        """
+        return self.search_grouped(
+            channel_query=channel_query,
+            limit=limit,
+            offset=offset,
+        )
 
     def resolve_channel(self, channel_query: str) -> sqlite3.Row | None:
         exact = self.conn.execute(

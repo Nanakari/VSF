@@ -34,3 +34,21 @@ jobs:
         run: python -m compileall -q .
       - name: Import application modules
         run: python -c "import app, config, database, indexer_app, main, search, song_identity, timeline_parser, youtube_client"
+      - name: Run regression tests
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+
+  site:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install site dependencies
+        run: npm ci
+      - name: Build and validate Worker site
+        run: |
+          npm run build
+          npm run validate

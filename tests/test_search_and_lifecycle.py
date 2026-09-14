@@ -1,3 +1,6 @@
+import os
+from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -77,6 +80,7 @@ class SearchAndLifecycleTests(unittest.TestCase):
             indexer_app.job_state["running"] = True
         try:
             client = indexer_app.app.test_client()
+            client.get("/")
             shutdown_response = client.post("/shutdown")
             close_response = client.get("/shutdown-close")
             self.assertEqual(shutdown_response.status_code, 409)
@@ -84,6 +88,52 @@ class SearchAndLifecycleTests(unittest.TestCase):
         finally:
             with indexer_app.job_lock:
                 indexer_app.job_state["running"] = previous
+
+    def test_local_management_requires_session_and_get_close_is_safe(self):
+        client = indexer_app.app.test_client()
+        self.assertEqual(client.post("/shutdown").status_code, 403)
+        self.assertEqual(client.get("/shutdown-close").status_code, 403)
+
+        client.get("/")
+        with patch.object(indexer_app, "force_shutdown") as force_shutdown:
+            response = client.get("/shutdown-close")
+            self.assertEqual(response.status_code, 200)
+            force_shutdown.assert_not_called()
+
+    def test_search_management_requires_session_and_get_close_is_safe(self):
+        previous_schema_ready = search_app.SCHEMA_READY
+        search_app.SCHEMA_READY = False
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                db_path = Path(directory) / "search.sqlite3"
+                with patch.object(search_app, "get_database_path", return_value=db_path):
+                    client = search_app.app.test_client()
+                    self.assertEqual(client.post("/shutdown").status_code, 403)
+                    self.assertEqual(client.get("/").status_code, 200)
+                    with patch.object(search_app, "force_shutdown") as force_shutdown:
+                        response = client.get("/shutdown-close")
+                        self.assertEqual(response.status_code, 200)
+                        force_shutdown.assert_not_called()
+        finally:
+            search_app.SCHEMA_READY = previous_schema_ready
+
+    def test_api_key_save_preserves_env_and_updates_runtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app_dir = Path(directory)
+            env_path = app_dir / ".env"
+            env_path.write_text(
+                "# keep this comment\nOTHER_SETTING=keep\nYOUTUBE_API_KEY=old-key\n",
+                encoding="utf-8",
+            )
+            with patch.object(indexer_app, "get_app_dir", return_value=app_dir):
+                with patch.dict(os.environ, {"YOUTUBE_API_KEY": "old-key"}, clear=False):
+                    indexer_app.write_env_api_key("new-key")
+                    self.assertEqual(os.environ["YOUTUBE_API_KEY"], "new-key")
+            content = env_path.read_text(encoding="utf-8")
+            self.assertIn("# keep this comment\n", content)
+            self.assertIn("OTHER_SETTING=keep\n", content)
+            self.assertIn("YOUTUBE_API_KEY=new-key\n", content)
+            self.assertNotIn("YOUTUBE_API_KEY=old-key", content)
 
     def test_indexer_initialization_failure_marks_job_finished(self):
         class BrokenDatabase:

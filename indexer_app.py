@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import hmac
 import logging
 from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
+import re
+import secrets
 import socket
 import subprocess
 import sys
@@ -12,7 +15,7 @@ import threading
 import time
 import webbrowser
 
-from flask import Flask, Response, jsonify, redirect, render_template, request, url_for
+from flask import Flask, Response, abort, jsonify, redirect, render_template, request, url_for
 from werkzeug.exceptions import HTTPException
 
 from config import get_app_dir, get_database_path, get_resource_dir, get_youtube_api_key
@@ -30,6 +33,9 @@ DEFAULT_MAX_COMMENTS = 100
 SETUP_PORT = 5001
 SHUTDOWN_DELAY_SECONDS = 3
 AUTO_EXIT_ENABLED = bool(getattr(sys, "frozen", False))
+LOCAL_SESSION_TOKEN = secrets.token_urlsafe(32)
+LOCAL_SESSION_COOKIE = f"VTuberSongFinderSession{SETUP_PORT}"
+LOOPBACK_ADDRESSES = {"127.0.0.1", "::1"}
 
 job_lock = threading.Lock()
 job_state: dict[str, object] = {
@@ -91,6 +97,26 @@ app.logger.propagate = True
 logging.getLogger("werkzeug").setLevel(logging.INFO)
 
 
+@app.after_request
+def attach_local_session_cookie(response: Response) -> Response:
+    if request.method == "GET" and request.path == "/":
+        response.set_cookie(
+            LOCAL_SESSION_COOKIE,
+            LOCAL_SESSION_TOKEN,
+            httponly=True,
+            samesite="Strict",
+        )
+    return response
+
+
+def require_local_management() -> None:
+    if request.remote_addr not in LOOPBACK_ADDRESSES:
+        abort(403)
+    supplied = request.headers.get("X-VTuber-Session") or request.cookies.get(LOCAL_SESSION_COOKIE, "")
+    if not hmac.compare_digest(supplied, LOCAL_SESSION_TOKEN):
+        abort(403)
+
+
 @app.route("/")
 def index():
     return render_template(
@@ -106,6 +132,7 @@ def index():
 
 @app.get("/search")
 def open_search():
+    require_local_management()
     if not ensure_peer_app("VTuberSongFinder.exe", 5000, "app.py"):
         return (
             "搜索工具启动失败，请确认 VTuberSongFinder.exe 与更新工具位于同一目录，"
@@ -116,6 +143,7 @@ def open_search():
 
 @app.post("/start")
 def start_index():
+    require_local_management()
     api_key = request.form.get("api_key", "").strip()
     channel = request.form.get("channel", "").strip()
     include_all = request.form.get("include_all") == "on"
@@ -129,7 +157,11 @@ def start_index():
     max_comments = parse_positive_int(request.form.get("max_comments"), DEFAULT_MAX_COMMENTS)
 
     if api_key:
-        write_env_api_key(api_key)
+        try:
+            write_env_api_key(api_key)
+        except OSError:
+            logger.exception("Failed to save YouTube API key")
+            return jsonify({"ok": False, "message": "无法保存 YouTube Data API Key。"}), 500
     else:
         api_key = read_saved_api_key()
 
@@ -155,12 +187,14 @@ def start_index():
 
 @app.get("/status")
 def status():
+    require_local_management()
     with job_lock:
         return jsonify(job_state)
 
 
 @app.post("/client-ping")
 def client_ping():
+    require_local_management()
     client_id = get_client_id()
     if client_id:
         with active_clients_lock:
@@ -171,6 +205,7 @@ def client_ping():
 
 @app.post("/client-close")
 def client_close():
+    require_local_management()
     client_id = get_client_id()
     if client_id:
         with active_clients_lock:
@@ -182,6 +217,7 @@ def client_close():
 
 @app.post("/shutdown")
 def shutdown():
+    require_local_management()
     if is_index_job_running():
         logger.warning("Ignoring shutdown request while an index job is running")
         return jsonify({"ok": False, "message": "索引任务正在运行，任务完成后才能退出。"}), 409
@@ -193,6 +229,7 @@ def shutdown():
 
 @app.get("/launcher")
 def launcher():
+    require_local_management()
     target = request.args.get("target", "/")
     if not target.startswith("/") or target.startswith("//"):
         target = "/"
@@ -201,10 +238,9 @@ def launcher():
 
 @app.get("/shutdown-close")
 def shutdown_close():
+    require_local_management()
     if is_index_job_running():
         return Response("索引任务正在运行，任务完成后才能退出。", status=409, mimetype="text/plain")
-    logger.info("Browser requested VTuber Song Finder Setup shutdown page")
-    threading.Timer(1.0, force_shutdown).start()
     return Response(make_close_page("VTuber Song Finder Setup"), mimetype="text/html")
 @app.errorhandler(Exception)
 def handle_unexpected_error(error: Exception):
@@ -320,8 +356,37 @@ def read_saved_api_key() -> str:
         return ""
 
 def write_env_api_key(api_key: str) -> None:
+    if not api_key or "\r" in api_key or "\n" in api_key:
+        raise ValueError("API key must be a single non-empty line")
     env_path = get_app_dir() / ".env"
-    env_path.write_text(f"YOUTUBE_API_KEY={api_key}\n", encoding="utf-8")
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        original = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+    except OSError:
+        raise
+
+    newline = "\r\n" if "\r\n" in original else "\n"
+    assignment = re.compile(r"^\s*(?:export\s+)?YOUTUBE_API_KEY\s*=")
+    lines = original.splitlines(keepends=True)
+    updated: list[str] = []
+    replaced = False
+    for line in lines:
+        if assignment.match(line.rstrip("\r\n")):
+            if not replaced:
+                updated.append(f"YOUTUBE_API_KEY={api_key}{newline}")
+                replaced = True
+            continue
+        updated.append(line)
+
+    if not replaced:
+        if updated and not original.endswith(("\n", "\r")):
+            updated.append(newline)
+        updated.append(f"YOUTUBE_API_KEY={api_key}{newline}")
+    with env_path.open("w", encoding="utf-8", newline="") as env_file:
+        env_file.write("".join(updated))
+    # python-dotenv intentionally does not override an existing process value.
+    # Keep the running setup process in sync with the value just saved.
+    os.environ["YOUTUBE_API_KEY"] = api_key
 
 
 def parse_positive_int(value: str | None, default: int) -> int:

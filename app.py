@@ -1,10 +1,12 @@
 ﻿from __future__ import annotations
 
 import json
+import hmac
 import logging
 from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
+import secrets
 import socket
 import subprocess
 import sys
@@ -12,7 +14,7 @@ import threading
 import time
 import webbrowser
 
-from flask import Flask, Response, jsonify, redirect, render_template, request, url_for
+from flask import Flask, Response, abort, jsonify, redirect, render_template, request, url_for
 from werkzeug.exceptions import HTTPException
 
 from config import get_app_dir, get_database_path, get_resource_dir
@@ -22,6 +24,9 @@ from database import SongDatabase
 PAGE_SIZE = 20
 SHUTDOWN_DELAY_SECONDS = 3
 AUTO_EXIT_ENABLED = bool(getattr(sys, "frozen", False))
+LOCAL_SESSION_TOKEN = secrets.token_urlsafe(32)
+LOCAL_SESSION_COOKIE = f"VTuberSongFinderSession{5000}"
+LOOPBACK_ADDRESSES = {"127.0.0.1", "::1"}
 SCHEMA_LOCK = threading.Lock()
 SCHEMA_READY = False
 active_clients: dict[str, float] = {}
@@ -77,8 +82,29 @@ app.logger.propagate = True
 logging.getLogger("werkzeug").setLevel(logging.INFO)
 
 
+@app.after_request
+def attach_local_session_cookie(response: Response) -> Response:
+    if request.method == "GET" and request.path == "/":
+        response.set_cookie(
+            LOCAL_SESSION_COOKIE,
+            LOCAL_SESSION_TOKEN,
+            httponly=True,
+            samesite="Strict",
+        )
+    return response
+
+
+def require_local_management() -> None:
+    if request.remote_addr not in LOOPBACK_ADDRESSES:
+        abort(403)
+    supplied = request.headers.get("X-VTuber-Session") or request.cookies.get(LOCAL_SESSION_COOKIE, "")
+    if not hmac.compare_digest(supplied, LOCAL_SESSION_TOKEN):
+        abort(403)
+
+
 @app.post("/client-ping")
 def client_ping():
+    require_local_management()
     client_id = get_client_id()
     if client_id:
         register_client(client_id)
@@ -87,6 +113,7 @@ def client_ping():
 
 @app.post("/client-close")
 def client_close():
+    require_local_management()
     client_id = get_client_id()
     if client_id:
         unregister_client(client_id)
@@ -97,6 +124,7 @@ def client_close():
 
 @app.post("/shutdown")
 def shutdown():
+    require_local_management()
     logger.info("Browser requested VTuber Song Finder shutdown")
     threading.Timer(1.5, force_shutdown).start()
     return {"ok": True}
@@ -105,6 +133,7 @@ def shutdown():
 
 @app.get("/launcher")
 def launcher():
+    require_local_management()
     target = request.args.get("target", "/")
     if not target.startswith("/") or target.startswith("//"):
         target = "/"
@@ -113,12 +142,12 @@ def launcher():
 
 @app.get("/shutdown-close")
 def shutdown_close():
-    logger.info("Browser requested VTuber Song Finder shutdown page")
-    threading.Timer(1.0, force_shutdown).start()
+    require_local_management()
     return Response(make_close_page("VTuber Song Finder"), mimetype="text/html")
 
 @app.get("/setup")
 def open_setup():
+    require_local_management()
     if not ensure_peer_app("VTuberSongFinderSetup.exe", 5001, "indexer_app.py"):
         return (
             "更新工具启动失败，请确认 VTuberSongFinderSetup.exe 与主程序位于同一目录，"
@@ -364,5 +393,4 @@ if __name__ == "__main__":
     except Exception:
         logger.exception("Failed to start VTuber Song Finder")
         raise
-
 

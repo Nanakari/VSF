@@ -71,6 +71,11 @@ class SongDatabase:
                 channel_id TEXT NOT NULL,
                 canonical_song_title TEXT NOT NULL,
                 normalized_song_title TEXT NOT NULL,
+                artist TEXT NOT NULL DEFAULT '',
+                song_key TEXT NOT NULL DEFAULT '',
+                artist_key TEXT NOT NULL DEFAULT '',
+                title_search TEXT NOT NULL DEFAULT '',
+                artist_search TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (channel_id) REFERENCES channels(channel_id),
@@ -113,6 +118,18 @@ class SongDatabase:
             CREATE INDEX IF NOT EXISTS idx_videos_index_status
                 ON videos(channel_id, index_status, last_index_attempt_at)
             """
+        )
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_songs_channel_song_key
+                ON songs(channel_id, song_key, artist_key)
+            """
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_songs_title_search ON songs(title_search)"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_songs_artist_search ON songs(artist_search)"
         )
         if self._needs_song_backfill():
             self._backfill_song_hierarchy()
@@ -464,14 +481,46 @@ class SongDatabase:
         raw_song_title: str,
         normalized_song_title: str,
     ) -> int:
+        parsed = parse_song_identity(raw_song_title)
+        song_title = canonical_song_title_for_merge(parsed.song_title)
+        song_key = compact_key(song_title)
+        artist = parsed.artist_text
+        artist_key = parsed.artist_group_key
+        title_search = " ".join(
+            part
+            for part in (
+                normalize_song_title(parsed.song_title),
+                normalize_song_title(normalized_song_title),
+                song_key,
+            )
+            if part
+        )
+        artist_search = compact_key(artist)
         self.conn.execute(
             """
-            INSERT INTO songs (channel_id, canonical_song_title, normalized_song_title)
-            VALUES (?, ?, ?)
+            INSERT INTO songs (
+                channel_id, canonical_song_title, normalized_song_title,
+                artist, song_key, artist_key, title_search, artist_search
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(channel_id, normalized_song_title) DO UPDATE SET
+                artist = excluded.artist,
+                song_key = excluded.song_key,
+                artist_key = excluded.artist_key,
+                title_search = excluded.title_search,
+                artist_search = excluded.artist_search,
                 updated_at = CURRENT_TIMESTAMP
             """,
-            (channel_id, raw_song_title, normalized_song_title),
+            (
+                channel_id,
+                raw_song_title,
+                normalized_song_title,
+                artist,
+                song_key,
+                artist_key,
+                title_search,
+                artist_search,
+            ),
         )
         row = self.conn.execute(
             """
@@ -577,19 +626,70 @@ class SongDatabase:
         normalized_query = normalize_song_title(song_query or "")
         query_key = compact_key(song_query or "")
         artist_query = (artist_query or "").strip()
-        rows = self.search_entries(
-            song_query=None if normalized_query else song_query,
-            channel_query=channel_query,
-            limit=None,
-        )
+
+        where_clauses: list[str] = []
+        params: list[object] = []
+        if normalized_query:
+            song_clause, song_params = build_song_match_clause(normalized_query)
+            where_clauses.append(song_clause)
+            params.extend(song_params)
+        if channel_query:
+            channel_like = f"%{escape_like(channel_query)}%"
+            where_clauses.append(
+                "(channels.channel_title LIKE ? ESCAPE '\\' OR channels.channel_id = ?)"
+            )
+            params.extend((channel_like, channel_query))
+        if artist_query:
+            artist_key_query = compact_key(artist_query)
+            if artist_key_query:
+                where_clauses.append(
+                    "songs.artist_search <> '' AND "
+                    "(songs.artist_search LIKE ? ESCAPE '\\' "
+                    "OR ? LIKE '%' || songs.artist_search || '%')"
+                )
+                params.extend((f"%{escape_like(artist_key_query)}%", artist_key_query))
+
+        where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
+        rows = self.conn.execute(
+            f"""
+            SELECT
+                songs.id AS song_id,
+                songs.channel_id,
+                channels.channel_title,
+                songs.canonical_song_title,
+                songs.normalized_song_title,
+                songs.artist,
+                songs.song_key,
+                songs.artist_key,
+                songs.title_search,
+                songs.artist_search,
+                COUNT(song_entries.id) AS entry_count,
+                MAX(videos.published_at) AS latest_published_at
+            FROM songs
+            JOIN channels ON channels.channel_id = songs.channel_id
+            JOIN song_entries ON song_entries.song_id = songs.id
+            JOIN videos ON videos.video_id = song_entries.video_id
+            {where_sql}
+            GROUP BY songs.id
+            """,
+            tuple(params),
+        ).fetchall()
+
         grouped: dict[tuple[str, str, str], dict[str, object]] = {}
         for row in rows:
-            parsed = parse_song_identity(row["raw_song_title"])
-            if artist_query and (parsed.ambiguous or not artist_query_matches(parsed.artist_keys, artist_query)):
+            merge_key = str(row["song_key"] or "")
+            row_artist_key = str(row["artist_key"] or "")
+            if not merge_key or (artist_query and not row_artist_key):
+                parsed = parse_song_identity(row["canonical_song_title"])
+                merge_key = merge_key or compact_key(
+                    canonical_song_title_for_merge(parsed.song_title)
+                )
+                row_artist_key = row_artist_key or parsed.artist_group_key
+
+            artist_keys = {key for key in row_artist_key.split("|") if key}
+            if artist_query and not artist_query_matches(artist_keys, artist_query):
                 continue
 
-            merge_key = compact_key(canonical_song_title_for_merge(parsed.song_title))
-            row_artist_key = parsed.artist_group_key
             key = self._find_similar_group_key(
                 grouped=grouped,
                 channel_id=row["channel_id"],
@@ -602,41 +702,39 @@ class SongDatabase:
                     "channel_title": row["channel_title"],
                     "song_key": merge_key,
                     "artist_key": row_artist_key,
-                    "artist_keys": set(parsed.artist_keys),
+                    "artist_keys": set(artist_keys),
                     "title_keys": set(),
-                    "song_title": "",
-                    "artist": "",
-                    "normalized_song_title": merge_key,
-                    "raw_titles": [],
+                    "song_title": row["canonical_song_title"],
+                    "artist": row["artist"] or "",
+                    "normalized_song_title": row["normalized_song_title"],
+                    "raw_titles": [row["canonical_song_title"]],
                     "entries": [],
+                    "song_ids": set(),
+                    "entry_count": 0,
+                    "latest_published_at": row["latest_published_at"],
+                    "source_channels": {row["channel_id"]: row["channel_title"]},
                 }
             grouped[key]["title_keys"].add(merge_key)
             if row_artist_key and not grouped[key]["artist_key"]:
                 grouped[key]["artist_key"] = row_artist_key
-            grouped[key]["artist_keys"].update(parsed.artist_keys)
-            grouped[key]["raw_titles"].append(row["raw_song_title"])
-            grouped[key]["entries"].append(dict(row))
+            grouped[key]["artist_keys"].update(artist_keys)
+            grouped[key]["raw_titles"].append(row["canonical_song_title"])
+            grouped[key]["song_ids"].add(int(row["song_id"]))
+            grouped[key]["entry_count"] += int(row["entry_count"] or 0)
+            if (row["latest_published_at"] or "") > (grouped[key]["latest_published_at"] or ""):
+                grouped[key]["latest_published_at"] = row["latest_published_at"]
+            grouped[key]["source_channels"][row["channel_id"]] = row["channel_title"]
 
         groups = list(grouped.values())
+        for group in groups:
+            group["song_title"] = choose_display_title(group["raw_titles"])
+            group["artist"] = choose_display_artist(group["raw_titles"])
         if normalized_query:
             groups = [
                 group
                 for group in groups
                 if group_matches_query(group, normalized_query, query_key)
             ]
-
-        for group in groups:
-            raw_titles = group.pop("raw_titles")
-            group["song_title"] = choose_display_title(raw_titles)
-            group["artist"] = choose_display_artist(raw_titles)
-            group["entries"].sort(
-                key=lambda entry: (
-                    entry.get("published_at") or "",
-                    entry.get("seconds") or 0,
-                ),
-                reverse=True,
-            )
-            group["channels"] = make_channel_groups(group["entries"])
 
         if not channel_query:
             groups = combine_cross_channel_groups(groups)
@@ -656,19 +754,92 @@ class SongDatabase:
                     str(group["song_title"]).casefold(),
                     str(group["artist"]).casefold(),
                     str(group["channel_title"]).casefold(),
-                    -len(group["entries"]),
+                    -int(group.get("entry_count", len(group["entries"]))),
                 )
             )
         else:
             groups.sort(
                 key=lambda group: (
-                    -len(group["entries"]),
+                    -int(group.get("entry_count", len(group["entries"]))),
                     str(group["channel_title"]).casefold(),
                     str(group["song_title"]).casefold(),
                     str(group["artist"]).casefold(),
                 )
             )
-        return groups[offset : offset + limit]
+        paged_groups = groups[offset : offset + limit]
+        self._hydrate_search_groups(paged_groups)
+        return paged_groups
+
+    def _hydrate_search_groups(self, groups: list[dict[str, object]]) -> None:
+        if not groups:
+            return
+
+        song_ids = sorted(
+            {
+                int(song_id)
+                for group in groups
+                for song_id in group.get("song_ids", set())
+            }
+        )
+        if song_ids:
+            placeholders = ",".join("?" for _ in song_ids)
+            rows = self.conn.execute(
+                f"""
+                SELECT
+                    song_entries.id AS entry_id,
+                    songs.id AS song_id,
+                    songs.canonical_song_title,
+                    songs.normalized_song_title,
+                    song_entries.raw_song_title,
+                    song_entries.timestamp_text,
+                    song_entries.seconds,
+                    song_entries.jump_url,
+                    videos.video_id,
+                    videos.title AS video_title,
+                    videos.published_at,
+                    channels.channel_id,
+                    channels.channel_title
+                FROM song_entries
+                JOIN songs ON songs.id = song_entries.song_id
+                JOIN videos ON videos.video_id = song_entries.video_id
+                JOIN channels ON channels.channel_id = videos.channel_id
+                WHERE song_entries.song_id IN ({placeholders})
+                ORDER BY videos.published_at DESC, song_entries.seconds ASC
+                """,
+                tuple(song_ids),
+            ).fetchall()
+        else:
+            rows = []
+
+        group_by_song_id = {
+            int(song_id): group
+            for group in groups
+            for song_id in group.get("song_ids", set())
+        }
+        for row in rows:
+            group = group_by_song_id.get(int(row["song_id"]))
+            if group is None:
+                continue
+            group["entries"].append(dict(row))
+            group["raw_titles"].append(row["raw_song_title"])
+
+        for group in groups:
+            group["entries"].sort(
+                key=lambda entry: (
+                    entry.get("published_at") or "",
+                    entry.get("seconds") or 0,
+                ),
+                reverse=True,
+            )
+            group["song_title"] = choose_display_title(group["raw_titles"])
+            group["artist"] = choose_display_artist(group["raw_titles"])
+            group["channels"] = make_channel_groups(group["entries"])
+            group["entry_count"] = len(group["entries"])
+            group["channel_count"] = len(group["channels"])
+            group.pop("raw_titles", None)
+            group.pop("song_ids", None)
+            group.pop("latest_published_at", None)
+            group.pop("source_channels", None)
 
     def search_channel_groups(
         self,
@@ -1000,6 +1171,58 @@ class SongDatabase:
             "CREATE INDEX IF NOT EXISTS idx_song_entries_song_id ON song_entries(song_id)"
         )
 
+        song_columns = {
+            row["name"]
+            for row in self.conn.execute("PRAGMA table_info(songs)").fetchall()
+        }
+        song_migrations = {
+            "artist": "ALTER TABLE songs ADD COLUMN artist TEXT NOT NULL DEFAULT ''",
+            "song_key": "ALTER TABLE songs ADD COLUMN song_key TEXT NOT NULL DEFAULT ''",
+            "artist_key": "ALTER TABLE songs ADD COLUMN artist_key TEXT NOT NULL DEFAULT ''",
+            "title_search": "ALTER TABLE songs ADD COLUMN title_search TEXT NOT NULL DEFAULT ''",
+            "artist_search": "ALTER TABLE songs ADD COLUMN artist_search TEXT NOT NULL DEFAULT ''",
+        }
+        for column, statement in song_migrations.items():
+            if column not in song_columns:
+                self.conn.execute(statement)
+
+        self._backfill_song_search_fields()
+
+    def _backfill_song_search_fields(self) -> None:
+        rows = self.conn.execute(
+            """
+            SELECT id, canonical_song_title, normalized_song_title
+            FROM songs
+            WHERE song_key = ''
+               OR title_search = ''
+               OR (artist_key = '' AND artist <> '')
+            """
+        ).fetchall()
+        for row in rows:
+            parsed = parse_song_identity(row["canonical_song_title"])
+            song_title = canonical_song_title_for_merge(parsed.song_title)
+            song_key = compact_key(song_title)
+            artist = parsed.artist_text
+            artist_key = parsed.artist_group_key
+            title_search = " ".join(
+                part
+                for part in (
+                    normalize_song_title(parsed.song_title),
+                    normalize_song_title(row["normalized_song_title"]),
+                    song_key,
+                )
+                if part
+            )
+            self.conn.execute(
+                """
+                UPDATE songs
+                SET artist = ?, song_key = ?, artist_key = ?,
+                    title_search = ?, artist_search = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (artist, song_key, artist_key, title_search, compact_key(artist), row["id"]),
+            )
+
     def _needs_song_backfill(self) -> bool:
         entry_row = self.conn.execute(
             "SELECT COUNT(*) AS count FROM song_entries"
@@ -1143,6 +1366,17 @@ def combine_cross_channel_groups(groups: list[dict[str, object]]) -> list[dict[s
             copied["title_keys"] = set(group.get("title_keys", set()))
             copied["artist_keys"] = set(group.get("artist_keys", set()))
             copied["entries"] = list(group.get("entries", []))
+            copied["raw_titles"] = list(group.get("raw_titles", []))
+            copied["song_ids"] = set(group.get("song_ids", set()))
+            copied["source_channels"] = dict(
+                group.get(
+                    "source_channels",
+                    {group.get("channel_id"): group.get("channel_title")},
+                )
+            )
+            copied["entry_count"] = int(
+                group.get("entry_count", len(copied["entries"]))
+            )
             copied["channel_titles"] = {group.get("channel_title")}
             combined.append(copied)
             continue
@@ -1157,6 +1391,17 @@ def combine_cross_channel_groups(groups: list[dict[str, object]]) -> list[dict[s
             ),
             reverse=True,
         )
+        target["raw_titles"].extend(group.get("raw_titles", []))
+        target["song_ids"].update(group.get("song_ids", set()))
+        target["source_channels"].update(
+            group.get(
+                "source_channels",
+                {group.get("channel_id"): group.get("channel_title")},
+            )
+        )
+        target["entry_count"] += int(
+            group.get("entry_count", len(group.get("entries", [])))
+        )
         target["channel_titles"].add(group.get("channel_title"))
         if len(str(group.get("song_title", ""))) < len(str(target.get("song_title", ""))):
             target["song_title"] = group.get("song_title", "")
@@ -1167,7 +1412,7 @@ def combine_cross_channel_groups(groups: list[dict[str, object]]) -> list[dict[s
 
     for group in combined:
         group["channels"] = make_channel_groups(group.get("entries", []))
-        group["channel_count"] = len(group["channels"])
+        group["channel_count"] = len(group["channels"]) or len(group.get("source_channels", {}))
     return combined
 
 

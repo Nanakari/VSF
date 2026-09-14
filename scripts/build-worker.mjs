@@ -6,10 +6,13 @@ const projectDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".
 const distDir = path.join(projectDir, "dist");
 const serverDir = path.join(distDir, "server");
 const openaiDir = path.join(distDir, ".openai");
+const drizzleSourceDir = path.join(projectDir, "drizzle");
+const drizzleOutputDir = path.join(openaiDir, "drizzle");
 
 fs.rmSync(distDir, { recursive: true, force: true });
 fs.mkdirSync(serverDir, { recursive: true });
 fs.mkdirSync(openaiDir, { recursive: true });
+fs.cpSync(drizzleSourceDir, drizzleOutputDir, { recursive: true });
 
 const read = (relativePath) => fs.readFileSync(path.join(projectDir, relativePath), "utf8");
 let worker = read("worker/index.js");

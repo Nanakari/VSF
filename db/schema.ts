@@ -12,6 +12,16 @@ export const channels = sqliteTable("channels", {
   channelTitle: text("channel_title").notNull(),
 });
 
+export const datasetMeta = sqliteTable("dataset_meta", {
+  id: integer("id").primaryKey().default(1),
+  version: text("version").notNull(),
+  status: text("status").notNull(),
+  expectedJson: text("expected_json").notNull().default("{}"),
+  updatedAt: text("updated_at")
+    .notNull()
+    .default(sql`CURRENT_TIMESTAMP`),
+});
+
 export const videos = sqliteTable(
   "videos",
   {
@@ -101,6 +111,7 @@ export const songEntries = sqliteTable(
   },
   (table) => [
     unique("song_entries_video_seconds_normalized_unique").on(table.videoId, table.seconds, table.normalizedSongTitle),
+    index("idx_song_entries_group_key").on(table.groupKey),
     index("idx_song_entries_song_id").on(table.songId),
     index("idx_song_entries_video_id").on(table.videoId),
     index("idx_song_entries_normalized").on(table.normalizedSongTitle),

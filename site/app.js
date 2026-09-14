@@ -103,51 +103,93 @@
     });
   }
 
-  function makeEntryPager(entries) {
+  function makeEntryPager(groupKey, channel) {
     const wrapper = createElement("div", "entry-pager");
     const list = createElement("div", "entry-list");
     const controls = createElement("div", "entry-controls");
     const previous = createElement("button", "entry-button", "上一页");
     const label = createElement("span", "entry-page-label");
     const next = createElement("button", "entry-button", "下一页");
-    let currentPage = 0;
-    const pageCount = Math.max(1, Math.ceil(entries.length / entryPageSize));
+    let currentPage = 1;
+    let pageCount = Math.max(1, Math.ceil(Number(channel.entryCount || 0) / entryPageSize));
+    let entries = [];
+    let loading = false;
+    let loaded = false;
+    let requestId = 0;
 
-    const render = () => {
+    const render = (message = "") => {
       list.replaceChildren();
-      const start = currentPage * entryPageSize;
-      entries.slice(start, start + entryPageSize).forEach((entry) => {
-        const row = createElement("div", "entry-row");
-        const time = createElement("a", "timestamp", entry.timestampText || "打开");
-        time.href = entry.jumpUrl;
-        time.target = "_blank";
-        time.rel = "noopener noreferrer";
-        const video = createElement("span", "entry-video", entry.videoTitle || "未命名视频");
-        const date = createElement("time", "entry-date", formatDate(entry.publishedAt));
-        row.append(time, video, date);
-        list.append(row);
+      if (message) {
+        list.append(createElement("div", "entry-state", message));
+      } else if (entries.length === 0) {
+        list.append(createElement("div", "entry-state", "暂无时间点"));
+      } else {
+        entries.forEach((entry) => {
+          const row = createElement("div", "entry-row");
+          const time = createElement("a", "timestamp", entry.timestampText || "打开");
+          time.href = entry.jumpUrl;
+          time.target = "_blank";
+          time.rel = "noopener noreferrer";
+          const video = createElement("span", "entry-video", entry.videoTitle || "未命名视频");
+          const date = createElement("time", "entry-date", formatDate(entry.publishedAt));
+          row.append(time, video, date);
+          list.append(row);
+        });
+      }
+      controls.hidden = pageCount <= 1;
+      previous.disabled = loading || currentPage <= 1;
+      next.disabled = loading || currentPage >= pageCount;
+      label.textContent = `第 ${currentPage} / ${pageCount} 页`;
+    };
+
+    const loadPage = async (page) => {
+      const currentRequest = ++requestId;
+      loading = true;
+      currentPage = page;
+      render("正在载入时间点…");
+      const params = new URLSearchParams({
+        groupKey,
+        channelId: channel.id,
+        page: String(page),
+        pageSize: String(entryPageSize),
       });
-      previous.disabled = currentPage === 0;
-      next.disabled = currentPage >= pageCount - 1;
-      label.textContent = `第 ${currentPage + 1} / ${pageCount} 页`;
+      try {
+        const payload = await requestJson(`/api/entries?${params}`);
+        if (currentRequest !== requestId) return;
+        entries = Array.isArray(payload.entries) ? payload.entries : [];
+        currentPage = Math.max(1, Number(payload.page || page));
+        pageCount = Math.max(1, Number(payload.pageCount || 1));
+        loaded = true;
+        loading = false;
+        render();
+      } catch (error) {
+        if (currentRequest !== requestId) return;
+        console.error(error);
+        loading = false;
+        render("时间点载入失败，请稍后重试。");
+      }
+    };
+
+    const loadIfNeeded = () => {
+      if (!loaded && !loading && Number(channel.entryCount || 0) > 0) {
+        void loadPage(currentPage);
+      }
     };
 
     previous.addEventListener("click", () => {
-      if (currentPage > 0) {
-        currentPage -= 1;
-        render();
+      if (!loading && currentPage > 1) {
+        void loadPage(currentPage - 1);
       }
     });
     next.addEventListener("click", () => {
-      if (currentPage < pageCount - 1) {
-        currentPage += 1;
-        render();
+      if (!loading && currentPage < pageCount) {
+        void loadPage(currentPage + 1);
       }
     });
     controls.append(previous, label, next);
     wrapper.append(list, controls);
     render();
-    return wrapper;
+    return { element: wrapper, loadIfNeeded };
   }
 
   function renderGroup(group, shouldOpen) {
@@ -169,8 +211,13 @@
       const channelSummary = createElement("summary", "channel-summary");
       channelSummary.append(createElement("span", "channel-chevron", "›"));
       channelSummary.append(createElement("strong", "channel-name", channel.title));
-      channelSummary.append(createElement("span", "channel-entry-count", `${formatNumber(channel.entries.length)} 个时间点`));
-      channelBlock.append(channelSummary, makeEntryPager(channel.entries || []));
+      channelSummary.append(createElement("span", "channel-entry-count", `${formatNumber(channel.entryCount)} 个时间点`));
+      const pager = makeEntryPager(group.id, channel);
+      channelBlock.append(channelSummary, pager.element);
+      channelBlock.addEventListener("toggle", () => {
+        if (channelBlock.open) pager.loadIfNeeded();
+      });
+      if (channelBlock.open) pager.loadIfNeeded();
       body.append(channelBlock);
     });
     details.append(summary, body);

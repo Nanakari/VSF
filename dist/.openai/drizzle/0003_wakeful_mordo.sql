@@ -1,0 +1,1 @@
+ALTER TABLE `dataset_meta` ADD `expected_json` text DEFAULT '{}' NOT NULL;

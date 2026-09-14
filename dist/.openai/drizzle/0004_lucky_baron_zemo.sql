@@ -1,0 +1,1 @@
+CREATE INDEX `idx_song_entries_group_key` ON `song_entries` (`group_key`);

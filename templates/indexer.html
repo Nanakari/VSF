@@ -37,6 +37,10 @@
             <span>每个视频评论数</span>
             <input name="max_comments" type="number" min="1" value="{{ default_max_comments }}">
           </label>
+          <label>
+            <span>近期歌单回扫天数（增量）</span>
+            <input name="recent_rescan_days" type="number" min="0" value="{{ default_recent_rescan_days }}">
+          </label>
         </div>
         <label>
           <span>索引模式</span>
@@ -56,6 +60,7 @@
             <span>重置历史回填进度</span>
           </label>
         </div>
+        <p class="subtle">增量更新会在此天数内复查暂时没有粉丝歌单的视频；填 0 可关闭近期回扫。</p>
         <button id="start-button" type="submit">开始索引</button>
       </form>
 

@@ -20,7 +20,7 @@ from werkzeug.exceptions import HTTPException
 
 from config import get_app_dir, get_database_path, get_resource_dir, get_youtube_api_key
 from database import SongDatabase
-from main import IndexStats, run_index_channel
+from main import DEFAULT_RECENT_RESCAN_DAYS, IndexStats, run_index_channel
 from youtube_client import (
     QuotaExceededError,
     YouTubeAPIError,
@@ -123,6 +123,7 @@ def index():
         "indexer.html",
         default_max_videos=DEFAULT_MAX_VIDEOS,
         default_max_comments=DEFAULT_MAX_COMMENTS,
+        default_recent_rescan_days=DEFAULT_RECENT_RESCAN_DAYS,
         auto_exit_enabled=AUTO_EXIT_ENABLED,
         search_url=url_for("open_search"),
         has_saved_api_key=bool(read_saved_api_key()),
@@ -155,6 +156,10 @@ def start_index():
     reset_backfill = request.form.get("reset_backfill") == "on"
     max_videos = parse_positive_int(request.form.get("max_videos"), DEFAULT_MAX_VIDEOS)
     max_comments = parse_positive_int(request.form.get("max_comments"), DEFAULT_MAX_COMMENTS)
+    recent_rescan_days = parse_nonnegative_int(
+        request.form.get("recent_rescan_days"),
+        DEFAULT_RECENT_RESCAN_DAYS,
+    )
 
     if api_key:
         try:
@@ -179,7 +184,16 @@ def start_index():
 
     worker = threading.Thread(
         target=run_index_job,
-        args=(api_key, channel, max_videos, max_comments, include_all, mode, reset_backfill),
+        args=(
+            api_key,
+            channel,
+            max_videos,
+            max_comments,
+            include_all,
+            mode,
+            reset_backfill,
+            recent_rescan_days,
+        ),
         daemon=True,
     )
     worker.start()
@@ -258,6 +272,7 @@ def run_index_job(
     include_all: bool,
     mode: str,
     reset_backfill: bool,
+    recent_rescan_days: int = DEFAULT_RECENT_RESCAN_DAYS,
 ) -> None:
     db: SongDatabase | None = None
     stats = IndexStats()
@@ -275,6 +290,7 @@ def run_index_job(
             incremental=mode == "incremental",
             backfill=mode == "backfill",
             reset_backfill=reset_backfill,
+            recent_rescan_days=recent_rescan_days,
             on_message=add_log,
             on_stats=update_stats,
         )
@@ -395,6 +411,14 @@ def parse_positive_int(value: str | None, default: int) -> int:
     except ValueError:
         return default
     return max(parsed, 1)
+
+
+def parse_nonnegative_int(value: str | None, default: int) -> int:
+    try:
+        parsed = int(value or default)
+    except ValueError:
+        return default
+    return max(parsed, 0)
 
 
 

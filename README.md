@@ -87,6 +87,14 @@ python main.py index-channel --channel "@Shairu_Vsinger" --max-videos 100 --incl
 python main.py update-channel --channel "@Shairu_Vsinger" --max-videos 1000
 ```
 
+增量更新会把失败重试、近期回扫和新出现的粉丝歌单检查分开处理：失败请求第一次可立即重试，连续失败会使用最长 1 小时的指数退避；最近 30 天内暂时没有时间轴的视频默认每天复查一次。可按频道更新频率调整近期回扫窗口：
+
+```bash
+python main.py update-channel --channel "@Shairu_Vsinger" --max-videos 1000 --rescan-days 60
+```
+
+历史回填会在每个视频完成、跳过或失败后保存游标。单个视频失败不会阻塞更旧视频，失败记录会留在重试队列中；如果程序或电脑中断，下一次运行会从保存的游标继续。历史回填完成后再次运行，也会先处理已经到期的失败重试。
+
 历史回填支持从上次中断位置继续：
 
 ```bash

@@ -20,6 +20,8 @@ from youtube_client import (
 
 
 DEFAULT_MAX_COMMENTS = 100
+DEFAULT_RECENT_RESCAN_DAYS = 30
+DEFAULT_RECENT_RECHECK_DAYS = 1
 
 
 def configure_output_encoding() -> None:
@@ -111,6 +113,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--include-all-videos",
         action="store_true",
         help="Do not filter by singing/karaoke keywords in the title.",
+    )
+    update_channel.add_argument(
+        "--rescan-days",
+        type=int,
+        default=DEFAULT_RECENT_RESCAN_DAYS,
+        help=(
+            "For recent videos without a timeline, retry after each interval day "
+            f"within this window. Default: {DEFAULT_RECENT_RESCAN_DAYS}."
+        ),
     )
 
     backfill_channel = subparsers.add_parser(
@@ -226,6 +237,7 @@ def main(argv: list[str] | None = None) -> int:
                 max_comments=args.max_comments,
                 include_all_videos=args.include_all_videos,
                 incremental=True,
+                recent_rescan_days=max(args.rescan_days, 0),
             )
             print_index_stats(stats)
             return 0
@@ -270,6 +282,7 @@ def run_index_channel(
     reset_backfill: bool = False,
     on_message: Callable[[str], None] | None = None,
     on_stats: Callable[[IndexStats], None] | None = None,
+    recent_rescan_days: int = DEFAULT_RECENT_RESCAN_DAYS,
 ) -> IndexStats:
     log = on_message or print
 
@@ -279,53 +292,74 @@ def run_index_channel(
     if reset_backfill:
         db.reset_backfill(channel_info.channel_id)
 
+    recent_rescan_days = max(0, int(recent_rescan_days))
+    recent_recheck_days = DEFAULT_RECENT_RECHECK_DAYS if incremental else None
+    backfill_state = db.get_backfill_state(channel_info.channel_id) if backfill else None
+    backfill_complete = bool(backfill_state is not None and backfill_state["backfill_complete"])
+
     log(f"Channel: {channel_info.title} ({channel_info.channel_id})")
     if backfill:
-        state = db.get_backfill_state(channel_info.channel_id)
-        if state is not None and state["backfill_complete"]:
-            log("Historical backfill is already complete; use --reset to start over.")
-            return IndexStats()
-        if state is not None and state["backfill_before_published_at"]:
+        if backfill_complete:
+            log("Historical backfill is complete; checking any pending retries.")
+        elif backfill_state is not None and backfill_state["backfill_before_published_at"]:
             log(
                 "Resuming historical backfill before "
-                f"{state['backfill_before_published_at']} ({state['backfill_before_video_id']})"
+                f"{backfill_state['backfill_before_published_at']} "
+                f"({backfill_state['backfill_before_video_id']})"
             )
         else:
             log("Starting historical backfill from the newest upload.")
     elif incremental:
         log("Incremental update scans recent uploads without stopping at existing videos.")
-        log("Completed videos are skipped; failed and stale no-timeline videos are retried.")
+        log(
+            "Completed videos are skipped; failed videos use bounded exponential retry "
+            f"backoff, and no-timeline videos from the last {recent_rescan_days} days "
+            f"are rechecked every {recent_recheck_days} day(s)."
+        )
     else:
         log("Scanning uploads from the newest position; existing completed videos are skipped.")
 
     stats = IndexStats()
-    if not backfill:
-        retry_rows = db.list_videos_for_retry(channel_info.channel_id, max_videos)
-        for row in retry_rows:
-            if not include_all_videos and not looks_like_song_stream_title(row["title"]):
-                db.mark_video_index_status(row["video_id"], "filtered")
-                stats.videos_skipped += 1
-                continue
-            stats.videos_seen += 1
-            log(f"Retrying: {row['title']} ({row['video_id']})")
-            video_stats = index_video(
-                db,
-                client,
-                VideoInfo(
-                    video_id=row["video_id"],
-                    title=row["title"],
-                    channel_id=row["channel_id"],
-                    channel_title=row["channel_title"],
-                    published_at=row["published_at"],
-                    duration_seconds=row["duration_seconds"],
-                ),
-                max_comments,
-                on_message=log,
-            )
-            merge_stats(stats, video_stats)
-            notify_stats(on_stats, stats)
+    retried_video_ids: set[str] = set()
+    retry_rows = db.list_videos_for_retry(
+        channel_info.channel_id,
+        max_videos,
+        recent_rescan_days=recent_rescan_days if incremental else 0,
+        recent_after_days=recent_recheck_days,
+    )
+    for row in retry_rows:
+        retried_video_ids.add(row["video_id"])
+        if not include_all_videos and not looks_like_song_stream_title(row["title"]):
+            db.mark_video_index_status(row["video_id"], "filtered")
+            stats.videos_skipped += 1
+            continue
+        stats.videos_seen += 1
+        log(f"Retrying: {row['title']} ({row['video_id']})")
+        video_stats = index_video(
+            db,
+            client,
+            VideoInfo(
+                video_id=row["video_id"],
+                title=row["title"],
+                channel_id=row["channel_id"],
+                channel_title=row["channel_title"],
+                published_at=row["published_at"],
+                duration_seconds=row["duration_seconds"],
+            ),
+            max_comments,
+            on_message=log,
+        )
+        merge_stats(stats, video_stats)
+        notify_stats(on_stats, stats)
 
-    cursor = db.get_backfill_state(channel_info.channel_id) if backfill else None
+    if backfill and backfill_complete:
+        if retry_rows:
+            log("Historical backfill remains complete; pending retries were processed.")
+        else:
+            log("Historical backfill is already complete; no pending retries are due.")
+        return stats
+
+    cursor = backfill_state if backfill else None
     past_cursor = not backfill or cursor is None or not cursor["backfill_before_published_at"]
     processed_in_batch = 0
     uploads_exhausted = True
@@ -358,6 +392,20 @@ def run_index_channel(
         )
         state = db.get_video_index_state(upload.video_id)
 
+        if upload.video_id in retried_video_ids:
+            # A retry row was already attempted at the beginning of this run.
+            # Do not immediately issue a second request when the same video is
+            # also inside the recent upload window; backoff must apply to the
+            # whole run, not only to the next run.
+            if backfill:
+                db.update_backfill_cursor(
+                    channel_info.channel_id,
+                    upload.published_at,
+                    upload.video_id,
+                )
+            notify_stats(on_stats, stats)
+            continue
+
         if not include_all_videos and not looks_like_song_stream_title(upload.title):
             db.mark_video_index_status(upload.video_id, "filtered")
             stats.videos_skipped += 1
@@ -370,7 +418,12 @@ def run_index_channel(
             notify_stats(on_stats, stats)
             continue
 
-        if not should_process_video(db, upload.video_id):
+        if not should_process_video(
+            db,
+            upload.video_id,
+            recent_rescan_days=recent_rescan_days if incremental else 0,
+            recent_after_days=recent_recheck_days,
+        ):
             if state is not None and state["index_status"] in {
                 "indexed",
                 "filtered",
@@ -388,24 +441,41 @@ def run_index_channel(
             continue
 
         log(f"Indexing: {upload.title} ({upload.video_id})")
-        video_stats = index_upload(
-            db,
-            client,
-            upload,
-            max_comments,
-            on_message=log,
-        )
+        try:
+            video_stats = index_upload(
+                db,
+                client,
+                upload,
+                max_comments,
+                on_message=log,
+            )
+        except QuotaExceededError:
+            # The video is already marked retry. Persist the cursor before the
+            # task exits so a later run can retry it without blocking older
+            # uploads in the historical scan.
+            if backfill:
+                db.update_backfill_cursor(
+                    channel_info.channel_id,
+                    upload.published_at,
+                    upload.video_id,
+                )
+                uploads_exhausted = False
+            raise
         merge_stats(stats, video_stats)
         notify_stats(on_stats, stats)
-        if backfill and video_stats.videos_failed:
-            uploads_exhausted = False
-            break
         if backfill:
+            # A failed video remains in the retry queue, but must not block the
+            # cursor from progressing through the rest of the channel.
             db.update_backfill_cursor(
                 channel_info.channel_id,
                 upload.published_at,
                 upload.video_id,
             )
+            if video_stats.videos_failed:
+                log(
+                    f"  continuing historical scan; retry remains queued for "
+                    f"{upload.video_id}"
+                )
 
     if backfill and uploads_exhausted:
         db.mark_backfill_complete(channel_info.channel_id)
@@ -419,15 +489,25 @@ def notify_stats(callback: Callable[[IndexStats], None] | None, stats: IndexStat
         callback(stats)
 
 
-def should_process_video(db: SongDatabase, video_id: str) -> bool:
+def should_process_video(
+    db: SongDatabase,
+    video_id: str,
+    recent_rescan_days: int = 0,
+    recent_after_days: int | None = None,
+) -> bool:
     state = db.get_video_index_state(video_id)
     if state is None:
         return True
     status = state["index_status"]
     if status in {"discovered", "retry", "indexing"}:
-        return True
+        return db.video_retry_is_due(video_id)
     if status == "no_timeline":
-        return db.video_needs_recheck(video_id, after_days=7)
+        return db.video_needs_recheck(
+            video_id,
+            after_days=7,
+            recent_rescan_days=recent_rescan_days,
+            recent_after_days=recent_after_days,
+        )
     if status == "comments_disabled":
         return db.video_needs_recheck(video_id, after_days=30)
     return False

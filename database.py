@@ -11,6 +11,28 @@ from timeline_parser import (
     normalize_song_title,
     select_best_timeline_comment,
 )
+
+
+RETRY_BACKOFF_BASE_SECONDS = 60
+RETRY_BACKOFF_MAX_SECONDS = 3600
+
+
+def retry_backoff_seconds(index_attempts: int) -> int:
+    """Return a bounded delay after a failed indexing attempt.
+
+    The first retry remains immediate so a transient failure can recover in the
+    same maintenance cycle. Repeated failures back off exponentially instead
+    of causing every update run to hammer the same video.
+    """
+    attempts = max(1, int(index_attempts))
+    if attempts <= 1:
+        return 0
+    return min(
+        RETRY_BACKOFF_MAX_SECONDS,
+        RETRY_BACKOFF_BASE_SECONDS * 2 ** min(attempts - 2, 6),
+    )
+
+
 from song_identity import (
     artist_query_matches,
     canonical_song_title_for_merge,
@@ -53,6 +75,7 @@ class SongDatabase:
                 index_attempts INTEGER NOT NULL DEFAULT 0,
                 last_index_attempt_at TEXT,
                 last_index_error TEXT,
+                next_retry_at TEXT,
                 comments_fetched_at TEXT,
                 FOREIGN KEY (channel_id) REFERENCES channels(channel_id)
             );
@@ -113,10 +136,13 @@ class SongDatabase:
             """
         )
         self._migrate_schema()
+        # Rebuild this index so databases created before next_retry_at receive
+        # the new retry-ordering columns as well.
+        self.conn.execute("DROP INDEX IF EXISTS idx_videos_index_status")
         self.conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_videos_index_status
-                ON videos(channel_id, index_status, last_index_attempt_at)
+                ON videos(channel_id, index_status, next_retry_at, last_index_attempt_at)
             """
         )
         self.conn.execute(
@@ -191,7 +217,8 @@ class SongDatabase:
         return self.conn.execute(
             """
             SELECT video_id, channel_id, title, published_at, duration_seconds,
-                   index_status, index_attempts, last_index_attempt_at, last_index_error
+                   index_status, index_attempts, last_index_attempt_at, last_index_error,
+                   next_retry_at
             FROM videos
             WHERE video_id = ?
             """,
@@ -205,7 +232,8 @@ class SongDatabase:
             SET index_status = 'indexing',
                 index_attempts = COALESCE(index_attempts, 0) + 1,
                 last_index_attempt_at = CURRENT_TIMESTAMP,
-                last_index_error = NULL
+                last_index_error = NULL,
+                next_retry_at = NULL
             WHERE video_id = ?
             """,
             (video_id,),
@@ -219,40 +247,143 @@ class SongDatabase:
         error: str | None = None,
         comments_fetched: bool = False,
     ) -> None:
+        row = self.conn.execute(
+            "SELECT index_attempts FROM videos WHERE video_id = ?",
+            (video_id,),
+        ).fetchone()
+        attempts = int(row["index_attempts"] or 0) if row is not None else 0
+        if status == "retry":
+            attempts = max(attempts, 1)
+            retry_modifier = f"+{retry_backoff_seconds(attempts)} seconds"
+        else:
+            retry_modifier = "+0 seconds"
+
         self.conn.execute(
             """
             UPDATE videos
             SET index_status = ?,
+                index_attempts = CASE
+                    WHEN ? = 'retry' AND COALESCE(index_attempts, 0) = 0 THEN 1
+                    ELSE index_attempts
+                END,
+                last_index_attempt_at = CASE
+                    WHEN ? = 'retry' AND last_index_attempt_at IS NULL THEN CURRENT_TIMESTAMP
+                    ELSE last_index_attempt_at
+                END,
                 last_index_error = ?,
+                next_retry_at = CASE
+                    WHEN ? = 'retry' THEN datetime('now', ?)
+                    ELSE NULL
+                END,
                 comments_fetched_at = CASE
                     WHEN ? THEN CURRENT_TIMESTAMP
                     ELSE comments_fetched_at
                 END
             WHERE video_id = ?
             """,
-            (status, error, comments_fetched, video_id),
+            (
+                status,
+                status,
+                status,
+                error,
+                status,
+                retry_modifier,
+                comments_fetched,
+                video_id,
+            ),
         )
         self.conn.commit()
 
-    def video_needs_recheck(self, video_id: str, after_days: int) -> bool:
+    def video_needs_recheck(
+        self,
+        video_id: str,
+        after_days: int,
+        recent_rescan_days: int = 0,
+        recent_after_days: int | None = None,
+    ) -> bool:
         interval = f"-{max(1, int(after_days))} days"
-        row = self.conn.execute(
+        recent_clause = ""
+        params: list[object] = [video_id, interval]
+        if recent_rescan_days > 0 and recent_after_days is not None:
+            recent_clause = """
+                    OR (
+                        published_at IS NOT NULL
+                        AND datetime(published_at) >= datetime('now', ?)
+                        AND last_index_attempt_at <= datetime('now', ?)
+                    )
             """
+            params.extend(
+                (
+                    f"-{max(1, int(recent_rescan_days))} days",
+                    f"-{max(1, int(recent_after_days))} days",
+                )
+            )
+        row = self.conn.execute(
+            f"""
             SELECT 1
             FROM videos
             WHERE video_id = ?
               AND (
                     last_index_attempt_at IS NULL
                     OR last_index_attempt_at <= datetime('now', ?)
+                    {recent_clause}
               )
             """,
-            (video_id, interval),
+            params,
         ).fetchone()
         return row is not None
 
-    def list_videos_for_retry(self, channel_id: str, limit: int) -> list[sqlite3.Row]:
-        rows = self.conn.execute(
+    def video_retry_is_due(self, video_id: str) -> bool:
+        """Return whether a retry/indexing row may be processed now."""
+        row = self.conn.execute(
             """
+            SELECT 1
+            FROM videos
+            WHERE video_id = ?
+              AND (
+                    next_retry_at IS NULL
+                    OR next_retry_at <= CURRENT_TIMESTAMP
+              )
+            """,
+            (video_id,),
+        ).fetchone()
+        return row is not None
+
+    def list_videos_for_retry(
+        self,
+        channel_id: str,
+        limit: int,
+        recent_rescan_days: int = 0,
+        recent_after_days: int | None = None,
+    ) -> list[sqlite3.Row]:
+        no_timeline_conditions = [
+            "videos.last_index_attempt_at IS NULL",
+            "videos.last_index_attempt_at <= datetime('now', ?)",
+        ]
+        params: list[object] = [channel_id, "-7 days"]
+        if recent_rescan_days > 0 and recent_after_days is not None:
+            no_timeline_conditions.append(
+                """
+                (
+                    videos.published_at IS NOT NULL
+                    AND datetime(videos.published_at) >= datetime('now', ?)
+                    AND videos.last_index_attempt_at <= datetime('now', ?)
+                )
+                """
+            )
+            params.extend(
+                (
+                    f"-{max(1, int(recent_rescan_days))} days",
+                    f"-{max(1, int(recent_after_days))} days",
+                )
+            )
+
+        comments_disabled_conditions = [
+            "videos.last_index_attempt_at IS NULL",
+            "videos.last_index_attempt_at <= datetime('now', '-30 days')",
+        ]
+        rows = self.conn.execute(
+            f"""
             SELECT
                 videos.video_id,
                 videos.channel_id,
@@ -260,25 +391,27 @@ class SongDatabase:
                 videos.published_at,
                 videos.duration_seconds,
                 channels.channel_title,
-                videos.index_status
+                videos.index_status,
+                videos.index_attempts,
+                videos.next_retry_at
             FROM videos
             JOIN channels ON channels.channel_id = videos.channel_id
             WHERE videos.channel_id = ?
               AND (
-                    videos.index_status IN ('retry', 'indexing')
-                    OR (
-                        videos.index_status = 'no_timeline'
+                    (
+                        videos.index_status IN ('retry', 'indexing')
                         AND (
-                            videos.last_index_attempt_at IS NULL
-                            OR videos.last_index_attempt_at <= datetime('now', '-7 days')
+                            videos.next_retry_at IS NULL
+                            OR videos.next_retry_at <= CURRENT_TIMESTAMP
                         )
                     )
                     OR (
+                        videos.index_status = 'no_timeline'
+                        AND ({" OR ".join(no_timeline_conditions)})
+                    )
+                    OR (
                         videos.index_status = 'comments_disabled'
-                        AND (
-                            videos.last_index_attempt_at IS NULL
-                            OR videos.last_index_attempt_at <= datetime('now', '-30 days')
-                        )
+                        AND ({" OR ".join(comments_disabled_conditions)})
                     )
               )
             ORDER BY
@@ -287,7 +420,7 @@ class SongDatabase:
                 videos.video_id
             LIMIT ?
             """,
-            (channel_id, max(1, int(limit))),
+            (*params, max(1, int(limit))),
         ).fetchall()
         return list(rows)
 
@@ -1138,6 +1271,7 @@ class SongDatabase:
             "index_attempts": "ALTER TABLE videos ADD COLUMN index_attempts INTEGER NOT NULL DEFAULT 0",
             "last_index_attempt_at": "ALTER TABLE videos ADD COLUMN last_index_attempt_at TEXT",
             "last_index_error": "ALTER TABLE videos ADD COLUMN last_index_error TEXT",
+            "next_retry_at": "ALTER TABLE videos ADD COLUMN next_retry_at TEXT",
             "comments_fetched_at": "ALTER TABLE videos ADD COLUMN comments_fetched_at TEXT",
         }
         for column, statement in video_migrations.items():

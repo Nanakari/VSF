@@ -20,6 +20,10 @@
 
 * { box-sizing: border-box; }
 
+/* Keep the HTML hidden state authoritative even when a component sets
+   display: flex for its normal state. */
+[hidden] { display: none !important; }
+
 html { min-width: 320px; background: var(--bg); }
 
 body {

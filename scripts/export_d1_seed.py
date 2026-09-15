@@ -12,7 +12,7 @@ OUTPUT_DIR = PROJECT_DIR / "build" / "d1-seed"
 sys.path.insert(0, str(PROJECT_DIR))
 
 from database import SongDatabase
-from song_identity import parse_song_identity
+from song_identity import make_title_search_text, parse_song_identity
 
 
 def row_value(row: object, key: str, default: object = None) -> object:
@@ -69,7 +69,7 @@ def export_seed() -> None:
     for index, group in enumerate(groups):
         song_key = str(group.get("song_key") or index)
         artist_key = str(group.get("artist_key") or "")
-        group_key = f"{song_key}::{artist_key}"
+        group_key = str(group.get("group_key") or f"{song_key}::{artist_key}")
         title_parts = [str(group.get("song_title") or "")]
         artist_parts = [str(group.get("artist") or "")]
         entry_count = 0
@@ -92,7 +92,7 @@ def export_seed() -> None:
                 "group_key": group_key,
                 "song_title": str(group.get("song_title") or "未命名歌曲"),
                 "artist": str(group.get("artist") or ""),
-                "title_search": " ".join(title_parts).casefold(),
+                "title_search": make_title_search_text(title_parts),
                 "artist_search": " ".join(artist_parts).casefold(),
                 "entry_count": entry_count,
                 "channel_count": len(channel_ids),
@@ -121,7 +121,9 @@ def export_seed() -> None:
                 "channel_id": row.get("channel_id"),
                 "canonical_song_title": row.get("canonical_song_title"),
                 "normalized_song_title": row.get("normalized_song_title"),
-                "artist": parsed.artist_text or group.get("artist") or "",
+                # Keep an unknown source row unknown. Falling back to the
+                # group's display artist made an artist query leak no-author variants.
+                "artist": parsed.artist_text or "",
                 "group_key": group_key,
                 "created_at": row.get("created_at"),
                 "updated_at": row.get("updated_at"),

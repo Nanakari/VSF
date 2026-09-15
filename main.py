@@ -159,6 +159,7 @@ def build_parser() -> argparse.ArgumentParser:
     search = subparsers.add_parser("search", help="Search indexed song titles.")
     search.add_argument("query", help="Song title keyword.")
     search.add_argument("--channel", help="Optional channel title keyword or channel ID filter.")
+    search.add_argument("--artist", help="Optional artist or author filter.")
     search.add_argument("--limit", type=int, default=25, help="Maximum results. Default: 25.")
 
     list_songs = subparsers.add_parser(
@@ -191,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.command == "search":
-            return run_search(db, args.query, args.limit, args.channel)
+            return run_search(db, args.query, args.limit, args.channel, args.artist)
 
         if args.command == "list-songs":
             return run_list_songs(db, args.channel, args.limit)
@@ -335,7 +336,7 @@ def run_index_channel(
             continue
         stats.videos_seen += 1
         log(f"Retrying: {row['title']} ({row['video_id']})")
-        video_stats = index_video(
+        video_stats = index_upload(
             db,
             client,
             VideoInfo(
@@ -510,6 +511,8 @@ def should_process_video(
         )
     if status == "comments_disabled":
         return db.video_needs_recheck(video_id, after_days=30)
+    if status == "filtered":
+        return True
     return False
 
 
@@ -527,6 +530,7 @@ def index_upload(
         upload.title,
         upload.published_at,
     )
+    db.begin_video_index(upload.video_id)
     try:
         full_video = client.get_video(upload.video_id)
     except QuotaExceededError:
@@ -536,7 +540,14 @@ def index_upload(
         db.mark_video_index_status(upload.video_id, "retry", str(exc))
         log(f"  failed and queued for retry: {upload.video_id} ({exc})")
         return IndexStats(videos_seen=1, videos_failed=1)
-    return index_video(db, client, full_video, max_comments, on_message=log)
+    return index_video(
+        db,
+        client,
+        full_video,
+        max_comments,
+        on_message=log,
+        attempt_started=True,
+    )
 
 
 def index_video(
@@ -545,6 +556,7 @@ def index_video(
     video: VideoInfo,
     max_comments: int | None,
     on_message: Callable[[str], None] | None = None,
+    attempt_started: bool = False,
 ) -> IndexStats:
     log = on_message or print
     stats = IndexStats(videos_seen=1)
@@ -556,7 +568,8 @@ def index_video(
         video.published_at,
         duration_seconds=video.duration_seconds,
     )
-    db.begin_video_index(video.video_id)
+    if not attempt_started:
+        db.begin_video_index(video.video_id)
 
     try:
         comments = client.get_comments(video.video_id, max_comments=max_comments)
@@ -595,8 +608,20 @@ def index_video(
     return stats
 
 
-def run_search(db: SongDatabase, query: str, limit: int, channel: str | None = None) -> int:
-    results = search_songs(db, query, limit=limit, channel_query=channel)
+def run_search(
+    db: SongDatabase,
+    query: str,
+    limit: int,
+    channel: str | None = None,
+    artist: str | None = None,
+) -> int:
+    results = search_songs(
+        db,
+        query,
+        limit=limit,
+        channel_query=channel,
+        artist_query=artist,
+    )
     if not results:
         print(f'No results for "{query}".')
         return 0

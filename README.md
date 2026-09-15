@@ -149,6 +149,7 @@ http://127.0.0.1:5000
 npm install
 npm run db:generate
 npm run build
+npm test
 ```
 
 从现有本地 SQLite 导出 D1 初始数据：
@@ -157,6 +158,8 @@ npm run build
 python scripts/export_d1_seed.py
 ```
 
+搜索别名会写入 `song_groups.title_search` 的 JSON 载荷。修改本地歌曲层级、清理时间轴或升级搜索规则后，需要重新运行导出并重新导入快照，线上才会获得完整的空格、版本和紧凑写法别名。旧快照仍可读取其主标题；没有重新导出的旧别名数据无法保证版本变体和历史标题写法都能命中。
+
 首次部署或本地数据发生清理、重建后，用快照导入替换线上数据。导入过程先写入临时表，最后一次性切换；如果中途失败，线上仍保留旧快照：
 
 ```powershell
@@ -164,6 +167,8 @@ python scripts/import_d1_snapshot.py --base-url "https://你的站点地址" --t
 ```
 
 脚本会读取 `build/d1-seed/manifest.json` 的数据版本，避免重复导入留下已删除的旧记录。网页端搜索结果分页，歌曲详情时间点也通过服务端分页接口按需加载；YouTube API Key、数据库写入和频道索引仍由本地版负责。站点当前保留为私有访问。
+
+网页端导入采用带版本号的暂存快照。每次 `start` 都会在同一事务中清理非活动版本的暂存行，并把新版本登记为活动版本；旧版本正在进行的分批写入或提交会因版本校验失败而停止，不能污染新版本。相同版本重复开始会保留已有暂存行；如果该版本已经是 `ready`，重复导入直接返回成功，不会重新清空或替换线上数据。只有行数完整的活动快照才会切换线上表，分批缺失或提交失败时仍保留原来的线上快照。
 
 搜索规则：
 
@@ -175,8 +180,35 @@ python scripts/import_d1_snapshot.py --base-url "https://你的站点地址" --t
 - 只命中一首歌时自动展开；命中多首歌时默认折叠。
 - 不指定频道、结果涉及多个频道时，歌曲下面会先列出频道二级列表，频道默认折叠。
 - 详情表不显示单独的时间列；点击“打开”会直接跳到对应时间点。
+- 歌曲查询会折叠空格并支持紧凑写法；短 ASCII 查询只接受完整词或前缀，较长查询允许标题子串和有限的拼写近似。
 
 “艺人 / 作者”依赖评论时间轴中的写法，例如 `怪物 / YOASOBI`、`KICK BACK - 米津玄師`、`【YOASOBI】アイドル`。没有写作者的条目不会被作者搜索命中，但仍可通过频道或歌曲搜索找到。
+
+搜索契约由 [tests/fixtures/search_contract.json](tests/fixtures/search_contract.json) 维护，Python 本地搜索和 Worker `/api/search` 共用这组样例。契约覆盖空格压缩、版本后缀、允许一字符拼写错误、拒绝短子串和近似误命中、作者筛选（包括副作者和未知作者）、频道筛选中的 `%` / `_` 字面量、结果分组以及分页顺序。两端的回归测试分别由下面的命令执行：
+
+```powershell
+python -m unittest discover -s tests -p "test_search*.py" -v
+npm test
+```
+
+可用独立脚本运行搜索分组基准。脚本会在 SQLite 内存数据库中生成固定数据，分别比较索引实现和保留旧全局插入顺序的 reference 实现；`collision_probe` 或任一查询的结果指纹不一致时以非零状态退出：
+
+```powershell
+python scripts/benchmark_search.py --repeats 3 > benchmark-output.json
+```
+
+本次 Windows、Python 3.10.18、SQLite 内存数据库的 p50 结果如下；完整输出见 [benchmark-output.json](benchmark-output.json)：
+
+| 数据规模 | 查询 | indexed p50 | reference p50 | reference / indexed | 分组数 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 3,000 songs / 20,000 entries | channel + song + artist | 58.130 ms | 63.755 ms | 1.097x | 25 |
+| 3,000 songs / 20,000 entries | cross-channel | 1,209.494 ms | 2,812.022 ms | 2.325x | 1,500 |
+| 3,000 songs / 20,000 entries | song only | 1,150.287 ms | 2,248.217 ms | 1.954x | 750 |
+| 10,000 songs / 100,000 entries | channel + song + artist | 235.391 ms | 258.825 ms | 1.100x | 79 |
+| 10,000 songs / 100,000 entries | cross-channel | 4,075.390 ms | 23,192.611 ms | 5.691x | 5,000 |
+| 10,000 songs / 100,000 entries | song only | 4,099.262 ms | 16,479.866 ms | 4.020x | 2,500 |
+
+channel 查询实际命中生成的 `Channel 000`；每个查询重复 3 次，表中为 timed p50。基准只测歌曲元数据筛选、分组和跨频道聚合，显式跳过分页结果的详情时间点读取与 entry hydration。计时包含两边相同的聚合结果指纹 JSON 规范化与哈希生成，最终指纹相等性作为基准校验；不包含 Worker/HTTP 响应序列化、网络、浏览器或其他端到端开销，因此这些数字用于比较本地搜索路径，不代表生产端到端延迟。
 
 ## Portable exe
 
@@ -201,6 +233,8 @@ logs/app.log
 - 输入频道 URL、handle 或 channel ID。
 - 点击“开始索引”，索引结果会写入同目录的 `vtuber_songs.sqlite3`。
 - 完成后再打开 `VTuberSongFinder.exe` 搜索。
+
+设置工具提交索引前会先校验频道和索引模式，再在任务锁内检查是否已有任务；校验失败或任务冲突时不会写入 `.env` 或修改运行中的 API Key。保存 Key 失败会返回错误且不会留下“正在运行”的任务状态；并发提交时只有一个请求能够保存 Key 并启动索引。
 
 ## 限制
 
@@ -250,6 +284,11 @@ python -m pip install -r requirements.txt
 python -m pip check
 python -m compileall -q .
 python -c "import app, config, database, indexer_app, main, search, song_identity, timeline_parser, youtube_client"
+python -m unittest discover -s tests -p "test_*.py" -v
+npm ci
+npm run build
+npm run validate
+npm test
 ```
 
 贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md)，敏感信息和漏洞报告方式见

@@ -2,7 +2,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from database import SongDatabase
-from main import run_index_channel
+from main import index_video, run_index_channel
 from youtube_client import ChannelInfo, CommentInfo, VideoInfo, YouTubeAPIError
 
 
@@ -13,6 +13,7 @@ class FakeClient:
         fail_comments_once=False,
         fail_comments_times=0,
         fail_video_ids=None,
+        fail_get_video_times=0,
         comment_text="00:01 First Song\n00:02 Second Song",
     ):
         self.uploads = uploads
@@ -20,8 +21,10 @@ class FakeClient:
         self.fail_comments_times = fail_comments_times
         self.fail_video_ids = set(fail_video_ids or ())
         self.failed_video_ids = set()
+        self.fail_get_video_times = fail_get_video_times
         self.comment_text = comment_text
         self.comment_attempts = 0
+        self.get_video_attempts = 0
 
     def get_channel(self, _channel):
         return ChannelInfo("channel", "Test Channel", "uploads")
@@ -31,6 +34,9 @@ class FakeClient:
             yield upload
 
     def get_video(self, video_id):
+        self.get_video_attempts += 1
+        if self.get_video_attempts <= self.fail_get_video_times:
+            raise YouTubeAPIError("video metadata failure")
         return next(upload for upload in self.uploads if upload.video_id == video_id)
 
     def get_comments(self, video_id, max_comments=None):
@@ -45,8 +51,15 @@ class FakeClient:
         yield CommentInfo("comment", self.comment_text, "tester", None)
 
 
-def video(video_id, published_at):
-    return VideoInfo(video_id, video_id, "channel", "Test Channel", published_at, 120)
+def video(video_id, published_at, title=None):
+    return VideoInfo(
+        video_id,
+        title or video_id,
+        "channel",
+        "Test Channel",
+        published_at,
+        120,
+    )
 
 
 class IndexingTests(unittest.TestCase):
@@ -65,6 +78,27 @@ class IndexingTests(unittest.TestCase):
         self.assertEqual(db.get_video_index_state("existing")["index_status"], "indexed")
         db.close()
 
+    def test_include_all_rechecks_previously_filtered_video(self):
+        db = SongDatabase(":memory:")
+        db.init_schema()
+        client = FakeClient([video("filtered", "2026-01-01", "Just chatting")])
+
+        first = run_index_channel(db, client, "channel", 10, 20, False, incremental=True)
+        self.assertEqual(first.videos_skipped, 1)
+        self.assertEqual(db.get_video_index_state("filtered")["index_status"], "filtered")
+
+        second = run_index_channel(db, client, "channel", 10, 20, True, incremental=True)
+        self.assertEqual(second.videos_indexed, 1)
+        self.assertEqual(db.get_video_index_state("filtered")["index_status"], "indexed")
+        self.assertEqual(db.get_video_index_state("filtered")["index_attempts"], 1)
+        self.assertEqual(client.get_video_attempts, 1)
+
+        third = run_index_channel(db, client, "channel", 10, 20, False, incremental=True)
+        self.assertEqual(third.videos_skipped, 1)
+        self.assertEqual(db.get_video_index_state("filtered")["index_status"], "filtered")
+        self.assertEqual(client.comment_attempts, 1)
+        db.close()
+
     def test_failed_comments_are_retried_on_the_next_run(self):
         db = SongDatabase(":memory:")
         db.init_schema()
@@ -77,6 +111,61 @@ class IndexingTests(unittest.TestCase):
         second = run_index_channel(db, client, "channel", 10, 20, True, incremental=True)
         self.assertEqual(second.videos_failed, 0)
         self.assertEqual(db.get_video_index_state("retry")["index_status"], "indexed")
+        db.close()
+
+    def test_video_metadata_failures_are_retried_with_backoff(self):
+        db = SongDatabase(":memory:")
+        db.init_schema()
+        client = FakeClient(
+            [video("metadata", "2026-01-01", "歌枠")],
+            fail_get_video_times=2,
+            comment_text="00:01 First Song\n00:02 Second Song\n03:00 Too Late",
+        )
+
+        first = run_index_channel(db, client, "channel", 10, 20, True, incremental=True)
+        self.assertEqual(first.videos_failed, 1)
+        state = db.get_video_index_state("metadata")
+        self.assertEqual(state["index_status"], "retry")
+        self.assertEqual(state["index_attempts"], 1)
+        self.assertIsNotNone(state["next_retry_at"])
+
+        second = run_index_channel(db, client, "channel", 10, 20, True, incremental=True)
+        self.assertEqual(second.videos_failed, 1)
+        state = db.get_video_index_state("metadata")
+        self.assertEqual(state["index_attempts"], 2)
+        self.assertIsNotNone(state["next_retry_at"])
+        self.assertEqual(client.get_video_attempts, 2)
+
+        deferred = run_index_channel(db, client, "channel", 10, 20, True, incremental=True)
+        self.assertEqual(deferred.videos_failed, 0)
+        self.assertEqual(client.get_video_attempts, 2)
+
+        db.conn.execute(
+            "UPDATE videos SET next_retry_at = datetime('now', '-1 second') WHERE video_id = 'metadata'"
+        )
+        db.conn.commit()
+        recovered = run_index_channel(db, client, "channel", 10, 20, True, incremental=True)
+        self.assertEqual(recovered.videos_indexed, 1)
+        self.assertEqual(db.get_video_index_state("metadata")["index_status"], "indexed")
+        self.assertEqual(db.get_video_index_state("metadata")["index_attempts"], 3)
+        self.assertEqual(db.get_video_index_state("metadata")["duration_seconds"], 120)
+        rows = db.conn.execute(
+            "SELECT seconds FROM song_entries WHERE video_id = ? ORDER BY seconds",
+            ("metadata",),
+        ).fetchall()
+        self.assertEqual([row["seconds"] for row in rows], [1, 2])
+        self.assertEqual(client.get_video_attempts, 3)
+        db.close()
+
+    def test_direct_video_index_starts_one_attempt(self):
+        db = SongDatabase(":memory:")
+        db.init_schema()
+        client = FakeClient([video("direct", "2026-01-01", "歌枠")])
+
+        stats = index_video(db, client, video("direct", "2026-01-01", "歌枠"), 20)
+
+        self.assertEqual(stats.videos_indexed, 1)
+        self.assertEqual(db.get_video_index_state("direct")["index_attempts"], 1)
         db.close()
 
     def test_backfill_cursor_resumes_after_a_batch(self):

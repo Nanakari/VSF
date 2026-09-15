@@ -40,6 +40,7 @@ from song_identity import (
     choose_display_title,
     compact_key,
     is_similar_song_key,
+    make_title_search_text,
     parse_song_identity,
 )
 
@@ -619,14 +620,8 @@ class SongDatabase:
         song_key = compact_key(song_title)
         artist = parsed.artist_text
         artist_key = parsed.artist_group_key
-        title_search = " ".join(
-            part
-            for part in (
-                normalize_song_title(parsed.song_title),
-                normalize_song_title(normalized_song_title),
-                song_key,
-            )
-            if part
+        title_search = make_title_search_text(
+            (parsed.song_title, normalized_song_title, song_key)
         )
         artist_search = compact_key(artist)
         self.conn.execute(
@@ -762,10 +757,8 @@ class SongDatabase:
 
         where_clauses: list[str] = []
         params: list[object] = []
-        if normalized_query:
-            song_clause, song_params = build_song_match_clause(normalized_query)
-            where_clauses.append(song_clause)
-            params.extend(song_params)
+        # Keep song-name filtering in group_matches_query so compact, fuzzy,
+        # and version-variant titles remain available for grouping.
         if channel_query:
             channel_like = f"%{escape_like(channel_query)}%"
             where_clauses.append(
@@ -809,6 +802,12 @@ class SongDatabase:
         ).fetchall()
 
         grouped: dict[tuple[str, str, str], dict[str, object]] = {}
+        # Keep the merge lookups bounded by the relevant song/artist keys.  The
+        # previous implementation walked every group for every row, which made
+        # a broad search quadratic while preserving the same first-match order.
+        grouped_by_channel_song: dict[tuple[str, str], list[tuple[str, str, str]]] = {}
+        grouped_by_channel_artist: dict[tuple[str, str], list[tuple[str, str, str]]] = {}
+        grouped_order: dict[tuple[str, str, str], int] = {}
         for row in rows:
             merge_key = str(row["song_key"] or "")
             row_artist_key = str(row["artist_key"] or "")
@@ -828,6 +827,9 @@ class SongDatabase:
                 channel_id=row["channel_id"],
                 merge_key=merge_key,
                 artist_key=row_artist_key,
+                grouped_by_channel_song=grouped_by_channel_song,
+                grouped_by_channel_artist=grouped_by_channel_artist,
+                grouped_order=grouped_order,
             )
             if key not in grouped:
                 grouped[key] = {
@@ -837,6 +839,7 @@ class SongDatabase:
                     "artist_key": row_artist_key,
                     "artist_keys": set(artist_keys),
                     "title_keys": set(),
+                    "normalized_title_keys": set(),
                     "song_title": row["canonical_song_title"],
                     "artist": row["artist"] or "",
                     "normalized_song_title": row["normalized_song_title"],
@@ -847,9 +850,23 @@ class SongDatabase:
                     "latest_published_at": row["latest_published_at"],
                     "source_channels": {row["channel_id"]: row["channel_title"]},
                 }
+                grouped_order[key] = len(grouped_order)
+                grouped_by_channel_song.setdefault(
+                    (str(row["channel_id"]), merge_key), []
+                ).append(key)
+                if row_artist_key:
+                    grouped_by_channel_artist.setdefault(
+                        (str(row["channel_id"]), row_artist_key), []
+                    ).append(key)
             grouped[key]["title_keys"].add(merge_key)
+            normalized_title = str(row["normalized_song_title"] or "")
+            if normalized_title:
+                grouped[key]["normalized_title_keys"].add(normalized_title)
             if row_artist_key and not grouped[key]["artist_key"]:
                 grouped[key]["artist_key"] = row_artist_key
+                grouped_by_channel_artist.setdefault(
+                    (str(row["channel_id"]), row_artist_key), []
+                ).append(key)
             grouped[key]["artist_keys"].update(artist_keys)
             grouped[key]["raw_titles"].append(row["canonical_song_title"])
             grouped[key]["song_ids"].add(int(row["song_id"]))
@@ -872,34 +889,79 @@ class SongDatabase:
         if not channel_query:
             groups = combine_cross_channel_groups(groups)
 
+        for group in groups:
+            group["group_key"] = (
+                f"{str(group.get('song_key') or '')}::"
+                f"{str(group.get('artist_key') or '')}"
+            )
+
         if normalized_query:
-            groups.sort(
-                key=lambda group: (
-                    group_query_relevance(group, normalized_query, query_key),
-                    str(group["channel_title"]).casefold(),
-                    str(group["song_title"]).casefold(),
-                    str(group["artist"]).casefold(),
+            if channel_query:
+                groups.sort(
+                    key=lambda group: (
+                        group_query_relevance(group, normalized_query, query_key),
+                        str(group["song_title"]).casefold(),
+                        str(group["artist"]).casefold(),
+                        str(group["channel_title"]).casefold(),
+                        str(group.get("group_key") or "").casefold(),
+                    )
                 )
-            )
+            else:
+                groups.sort(
+                    key=lambda group: (
+                        group_query_relevance(group, normalized_query, query_key),
+                        str(group["song_title"]).casefold(),
+                        str(group["artist"]).casefold(),
+                        str(group.get("group_key") or "").casefold(),
+                    )
+                )
         elif artist_query:
-            groups.sort(
-                key=lambda group: (
-                    str(group["song_title"]).casefold(),
-                    str(group["artist"]).casefold(),
-                    str(group["channel_title"]).casefold(),
-                    -int(group.get("entry_count", len(group["entries"]))),
+            if channel_query:
+                groups.sort(
+                    key=lambda group: (
+                        str(group["song_title"]).casefold(),
+                        str(group["artist"]).casefold(),
+                        str(group["channel_title"]).casefold(),
+                        -int(group.get("entry_count", len(group["entries"]))),
+                        str(group.get("group_key") or "").casefold(),
+                    )
                 )
-            )
+            else:
+                groups.sort(
+                    key=lambda group: (
+                        str(group["song_title"]).casefold(),
+                        str(group["artist"]).casefold(),
+                        -int(group.get("entry_count", len(group["entries"]))),
+                        str(group.get("group_key") or "").casefold(),
+                    )
+                )
         else:
-            groups.sort(
-                key=lambda group: (
-                    -int(group.get("entry_count", len(group["entries"]))),
-                    str(group["channel_title"]).casefold(),
-                    str(group["song_title"]).casefold(),
-                    str(group["artist"]).casefold(),
+            if channel_query:
+                groups.sort(
+                    key=lambda group: (
+                        -int(group.get("entry_count", len(group["entries"]))),
+                        str(group["channel_title"]).casefold(),
+                        str(group["song_title"]).casefold(),
+                        str(group["artist"]).casefold(),
+                        str(group.get("group_key") or "").casefold(),
+                    )
                 )
-            )
-        paged_groups = groups[offset : offset + limit]
+            else:
+                groups.sort(
+                    key=lambda group: (
+                        -int(group.get("entry_count", len(group["entries"]))),
+                        str(group["song_title"]).casefold(),
+                        str(group["artist"]).casefold(),
+                        str(group.get("group_key") or "").casefold(),
+                    )
+                )
+        normalized_limit = None if limit is None else max(1, int(limit))
+        normalized_offset = max(0, int(offset))
+        paged_groups = (
+            groups[normalized_offset:]
+            if normalized_limit is None
+            else groups[normalized_offset : normalized_offset + normalized_limit]
+        )
         self._hydrate_search_groups(paged_groups)
         return paged_groups
 
@@ -957,13 +1019,7 @@ class SongDatabase:
             group["raw_titles"].append(row["raw_song_title"])
 
         for group in groups:
-            group["entries"].sort(
-                key=lambda entry: (
-                    entry.get("published_at") or "",
-                    entry.get("seconds") or 0,
-                ),
-                reverse=True,
-            )
+            sort_search_entries(group["entries"])
             group["song_title"] = choose_display_title(group["raw_titles"])
             group["artist"] = choose_display_artist(group["raw_titles"])
             group["channels"] = make_channel_groups(group["entries"])
@@ -1022,34 +1078,56 @@ class SongDatabase:
         channel_id: str,
         merge_key: str,
         artist_key: str,
+        grouped_by_channel_song: dict[tuple[str, str], list[tuple[str, str, str]]] | None = None,
+        grouped_by_channel_artist: dict[tuple[str, str], list[tuple[str, str, str]]] | None = None,
+        grouped_order: dict[tuple[str, str, str], int] | None = None,
     ) -> tuple[str, str, str]:
         exact_key = (channel_id, merge_key, artist_key)
         if exact_key in grouped:
             return exact_key
 
+        if grouped_order is None:
+            grouped_order = {key: index for index, key in enumerate(grouped)}
+
+        def ordered(keys: list[tuple[str, str, str]]) -> list[tuple[str, str, str]]:
+            return sorted(keys, key=lambda key: grouped_order.get(key, len(grouped_order)))
+
+        song_candidates = (
+            grouped_by_channel_song.get((str(channel_id), merge_key), [])
+            if grouped_by_channel_song is not None
+            else [
+                key
+                for key, group in grouped.items()
+                if key[0] == channel_id and str(group.get("song_key")) == merge_key
+            ]
+        )
+        song_candidates = ordered(song_candidates)
         if not artist_key:
-            for key, group in grouped.items():
-                if key[0] == channel_id and str(group.get("song_key")) == merge_key:
-                    return key
+            if song_candidates:
+                return song_candidates[0]
             return exact_key
 
         unknown_key = (channel_id, merge_key, "")
         if unknown_key in grouped:
             return unknown_key
 
-        for key, group in grouped.items():
-            if key[0] != channel_id:
-                continue
-            if str(group.get("song_key")) != merge_key:
-                continue
+        for key in song_candidates:
+            group = grouped[key]
             if are_artist_keys_compatible(str(group.get("artist_key", "")), artist_key):
                 return key
 
-        for key, group in grouped.items():
-            if key[0] != channel_id:
-                continue
-            if group.get("artist_key") != artist_key:
-                continue
+        artist_candidates = (
+            grouped_by_channel_artist.get((str(channel_id), artist_key), [])
+            if grouped_by_channel_artist is not None
+            else [
+                key
+                for key, group in grouped.items()
+                if key[0] == channel_id and group.get("artist_key") == artist_key
+            ]
+        )
+        artist_candidates = ordered(artist_candidates)
+        for key in artist_candidates:
+            group = grouped[key]
             if is_similar_song_key(str(group["song_key"]), merge_key):
                 return key
         return exact_key
@@ -1329,6 +1407,7 @@ class SongDatabase:
             FROM songs
             WHERE song_key = ''
                OR title_search = ''
+               OR substr(ltrim(title_search), 1, 1) <> '{'
                OR (artist_key = '' AND artist <> '')
             """
         ).fetchall()
@@ -1338,14 +1417,12 @@ class SongDatabase:
             song_key = compact_key(song_title)
             artist = parsed.artist_text
             artist_key = parsed.artist_group_key
-            title_search = " ".join(
-                part
-                for part in (
-                    normalize_song_title(parsed.song_title),
-                    normalize_song_title(row["normalized_song_title"]),
+            title_search = make_title_search_text(
+                (
+                    parsed.song_title,
+                    row["normalized_song_title"],
                     song_key,
                 )
-                if part
             )
             self.conn.execute(
                 """
@@ -1456,7 +1533,16 @@ def group_matches_query(
 ) -> bool:
     title_keys = [str(key) for key in group.get("title_keys", set())]
     if not query_key:
-        return True
+        if not normalized_query:
+            return True
+        normalized_titles = [
+            str(key)
+            for key in group.get("normalized_title_keys", set())
+            if str(key)
+        ]
+        if normalized_titles:
+            return any(normalized_query in title for title in normalized_titles)
+        return normalized_query in str(group.get("normalized_song_title", ""))
     if is_short_ascii_key(query_key):
         return any(
             title_key == query_key
@@ -1469,6 +1555,13 @@ def group_matches_query(
             return True
         if is_similar_song_key(title_key, query_key):
             return True
+    normalized_titles = [
+        str(key)
+        for key in group.get("normalized_title_keys", set())
+        if str(key)
+    ]
+    if normalized_titles:
+        return any(normalized_query in title for title in normalized_titles)
     return normalized_query in str(group.get("normalized_song_title", ""))
 
 
@@ -1478,6 +1571,13 @@ def group_query_relevance(
     query_key: str,
 ) -> int:
     title_keys = [str(key) for key in group.get("title_keys", set())]
+    if not query_key:
+        normalized_titles = [
+            str(key)
+            for key in group.get("normalized_title_keys", set())
+            if str(key)
+        ]
+        return 4 if any(normalized_query in title for title in normalized_titles) else 5
     if query_key in title_keys:
         return 0
     if any(title_key.startswith(query_key) for title_key in title_keys):
@@ -1486,19 +1586,35 @@ def group_query_relevance(
         return 2
     if any(is_similar_song_key(title_key, query_key) for title_key in title_keys):
         return 3
-    if normalized_query in str(group.get("normalized_song_title", "")):
+    normalized_titles = [
+        str(key)
+        for key in group.get("normalized_title_keys", set())
+        if str(key)
+    ]
+    if any(normalized_query in title for title in normalized_titles) or normalized_query in str(
+        group.get("normalized_song_title", "")
+    ):
         return 4
     return 5
 
 
 def combine_cross_channel_groups(groups: list[dict[str, object]]) -> list[dict[str, object]]:
     combined: list[dict[str, object]] = []
+    by_song_key: dict[str, list[dict[str, object]]] = {}
+    by_artist_key: dict[str, list[dict[str, object]]] = {}
     for group in groups:
-        target = find_cross_channel_target(combined, group)
+        target = find_cross_channel_target_indexed(
+            by_song_key,
+            by_artist_key,
+            group,
+        )
         if target is None:
             copied = dict(group)
             copied["title_keys"] = set(group.get("title_keys", set()))
             copied["artist_keys"] = set(group.get("artist_keys", set()))
+            copied["normalized_title_keys"] = set(
+                group.get("normalized_title_keys", set())
+            )
             copied["entries"] = list(group.get("entries", []))
             copied["raw_titles"] = list(group.get("raw_titles", []))
             copied["song_ids"] = set(group.get("song_ids", set()))
@@ -1512,19 +1628,24 @@ def combine_cross_channel_groups(groups: list[dict[str, object]]) -> list[dict[s
                 group.get("entry_count", len(copied["entries"]))
             )
             copied["channel_titles"] = {group.get("channel_title")}
+            # The indexed lookup has separate exact-song and fuzzy-artist
+            # buckets.  Keep the old linear scan's global first-seen order so
+            # selecting a target does not make exact matches outrank an older
+            # fuzzy match.  This private marker is removed before returning.
+            copied["_cross_channel_order"] = len(combined)
             combined.append(copied)
+            by_song_key.setdefault(str(copied.get("song_key") or ""), []).append(copied)
+            artist_key = str(copied.get("artist_key") or "")
+            if artist_key:
+                by_artist_key.setdefault(artist_key, []).append(copied)
             continue
 
         target["title_keys"].update(group.get("title_keys", set()))
         target["artist_keys"].update(group.get("artist_keys", set()))
-        target["entries"].extend(group.get("entries", []))
-        target["entries"].sort(
-            key=lambda entry: (
-                entry.get("published_at") or "",
-                entry.get("seconds") or 0,
-            ),
-            reverse=True,
+        target.setdefault("normalized_title_keys", set()).update(
+            group.get("normalized_title_keys", set())
         )
+        target["entries"].extend(group.get("entries", []))
         target["raw_titles"].extend(group.get("raw_titles", []))
         target["song_ids"].update(group.get("song_ids", set()))
         target["source_channels"].update(
@@ -1542,12 +1663,50 @@ def combine_cross_channel_groups(groups: list[dict[str, object]]) -> list[dict[s
         if not target.get("artist") and group.get("artist"):
             target["artist"] = group.get("artist", "")
             target["artist_key"] = group.get("artist_key", "")
+            artist_key = str(target.get("artist_key") or "")
+            if artist_key:
+                by_artist_key.setdefault(artist_key, []).append(target)
+        sort_search_entries(target["entries"])
         target["channels"] = make_channel_groups(target["entries"])
 
     for group in combined:
         group["channels"] = make_channel_groups(group.get("entries", []))
         group["channel_count"] = len(group["channels"]) or len(group.get("source_channels", {}))
+        group.pop("_cross_channel_order", None)
     return combined
+
+
+def find_cross_channel_target_indexed(
+    by_song_key: dict[str, list[dict[str, object]]],
+    by_artist_key: dict[str, list[dict[str, object]]],
+    candidate: dict[str, object],
+) -> dict[str, object] | None:
+    candidate_song_key = str(candidate.get("song_key") or "")
+    candidate_artist_key = str(candidate.get("artist_key") or "")
+    matches: list[dict[str, object]] = []
+    for group in by_song_key.get(candidate_song_key, []):
+        if are_artist_keys_compatible(
+            str(group.get("artist_key") or ""), candidate_artist_key
+        ):
+            matches.append(group)
+    if candidate_artist_key:
+        for group in by_artist_key.get(candidate_artist_key, []):
+            if is_similar_song_key(
+                str(group.get("song_key") or ""), candidate_song_key
+            ):
+                matches.append(group)
+    if not matches:
+        return None
+
+    # The two indexes intentionally do not encode one shared ordering: a
+    # candidate can match an exact-song bucket and an older fuzzy-artist
+    # bucket.  ``combine_cross_channel_groups`` annotates every copied group
+    # with its position in the old combined list, so choose the earliest
+    # ordinal after collecting both candidate sets.  Callers that construct
+    # these internal index maps must provide the same marker.
+    if any(not isinstance(group.get("_cross_channel_order"), int) for group in matches):
+        raise ValueError("indexed cross-channel candidates require insertion ordinals")
+    return min(matches, key=lambda group: int(group["_cross_channel_order"]))
 
 
 def find_cross_channel_target(
@@ -1628,6 +1787,27 @@ def are_artist_tokens_nearly_equal(left: str, right: str) -> bool:
     return previous[-1] <= 2
 
 
+def sort_search_entries(entries: list[dict[str, object]]) -> None:
+    """Sort entries the same way as the D1 entries query.
+
+    Stable passes keep the mixed direction explicit: published date descending,
+    timestamp ascending, and the database entry id ascending for ties.  The
+    date pass also puts rows without a date after dated videos, matching
+    SQLite's ``ORDER BY ... DESC`` behavior for this column.
+    """
+    entries.sort(
+        key=lambda entry: int(entry.get("entry_id", entry.get("id", 0)) or 0)
+    )
+    entries.sort(key=lambda entry: int(entry.get("seconds", 0) or 0))
+    entries.sort(
+        key=lambda entry: (
+            entry.get("published_at") is not None,
+            str(entry.get("published_at") or ""),
+        ),
+        reverse=True,
+    )
+
+
 def make_channel_groups(entries: list[dict[str, object]]) -> list[dict[str, object]]:
     channels: dict[str, dict[str, object]] = {}
     for entry in entries:
@@ -1642,13 +1822,7 @@ def make_channel_groups(entries: list[dict[str, object]]) -> list[dict[str, obje
 
     result = list(channels.values())
     for channel in result:
-        channel["entries"].sort(
-            key=lambda entry: (
-                entry.get("published_at") or "",
-                entry.get("seconds") or 0,
-            ),
-            reverse=True,
-        )
+        sort_search_entries(channel["entries"])
     result.sort(
         key=lambda channel: (
             -len(channel["entries"]),

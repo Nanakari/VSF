@@ -52,12 +52,18 @@ def import_snapshot(base_url: str, token: str, input_dir: Path) -> None:
     tables = manifest.get("tables")
     if not isinstance(tables, dict):
         raise RuntimeError("manifest.json does not contain table row counts")
-    request_json(
+    start_result = request_json(
         session,
         f"{base_url}/api/admin/snapshot/start",
         token,
         {"version": version, "tables": tables},
     )
+    # A retry after a successful commit is already complete.  Seeding a ready
+    # snapshot is intentionally rejected by the Worker, so finish idempotently
+    # here instead of treating that expected 409 as an import failure.
+    if start_result.get("status") == "ready":
+        print(f"Snapshot {version} is already committed.")
+        return
     for table in TABLE_ORDER:
         rows = json.loads((input_dir / f"{table}.json").read_text(encoding="utf-8"))
         for start in range(0, len(rows), BATCH_SIZE):

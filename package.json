@@ -5,6 +5,7 @@
   "scripts": {
     "build": "node scripts/build-worker.mjs",
     "validate": "node scripts/validate-worker.mjs",
+    "test": "node scripts/test-worker.mjs",
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {

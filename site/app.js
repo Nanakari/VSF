@@ -103,7 +103,7 @@
     });
   }
 
-  function makeEntryPager(groupKey, channel) {
+  function makeEntryPager(groupKey, channel, artistQuery = "") {
     const wrapper = createElement("div", "entry-pager");
     const list = createElement("div", "entry-list");
     const controls = createElement("div", "entry-controls");
@@ -153,6 +153,7 @@
         page: String(page),
         pageSize: String(entryPageSize),
       });
+      if (artistQuery.trim()) params.set("artist", artistQuery.trim());
       try {
         const payload = await requestJson(`/api/entries?${params}`);
         if (currentRequest !== requestId) return;
@@ -192,7 +193,7 @@
     return { element: wrapper, loadIfNeeded };
   }
 
-  function renderGroup(group, shouldOpen) {
+  function renderGroup(group, shouldOpen, artistQuery = "") {
     const details = createElement("details", "song-group");
     details.open = shouldOpen;
     const summary = createElement("summary", "song-summary");
@@ -212,7 +213,7 @@
       channelSummary.append(createElement("span", "channel-chevron", "›"));
       channelSummary.append(createElement("strong", "channel-name", channel.title));
       channelSummary.append(createElement("span", "channel-entry-count", `${formatNumber(channel.entryCount)} 个时间点`));
-      const pager = makeEntryPager(group.id, channel);
+      const pager = makeEntryPager(group.id, channel, artistQuery);
       channelBlock.append(channelSummary, pager.element);
       channelBlock.addEventListener("toggle", () => {
         if (channelBlock.open) pager.loadIfNeeded();
@@ -231,8 +232,9 @@
   }
 
   function renderResults() {
+    const queries = getQueries();
     elements.resultsList.replaceChildren();
-    state.matches.forEach((group) => elements.resultsList.append(renderGroup(group, state.total === 1)));
+    state.matches.forEach((group) => elements.resultsList.append(renderGroup(group, state.total === 1, queries.artist)));
     elements.resultSummary.textContent = state.total ? `${formatNumber(state.total)} 首匹配歌曲` : "没有匹配歌曲";
     setEmptyState("没有找到匹配条目", "可以换一种歌曲或作者写法，或者先清除一个筛选条件。", state.total !== 0);
     elements.resultsPager.hidden = state.total === 0 || state.pageCount <= 1;

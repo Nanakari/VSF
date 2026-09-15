@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import re
+import json
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from timeline_parser import clean_song_title, normalize_song_title
@@ -167,6 +169,28 @@ def compact_key(value: str) -> str:
     return re.sub(r"[\W_]+", "", normalized, flags=re.UNICODE)
 
 
+def make_title_search_text(values: Iterable[str]) -> str:
+    """Build a portable normalized/compact title alias payload."""
+    normalized_values: list[str] = []
+    compact: list[str] = []
+    seen_compact: set[str] = set()
+    seen_normalized: set[str] = set()
+    for value in values:
+        normalized_title = normalize_song_title(str(value or ""))
+        if normalized_title and normalized_title not in seen_normalized:
+            seen_normalized.add(normalized_title)
+            normalized_values.append(normalized_title)
+        key = compact_key(str(value or ""))
+        if key and key not in seen_compact:
+            seen_compact.add(key)
+            compact.append(key)
+    return json.dumps(
+        {"normalized": normalized_values, "compact": compact},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
 def canonical_song_title_for_merge(song_title: str) -> str:
     title = clean_song_title(song_title)
     previous = None
@@ -179,7 +203,7 @@ def canonical_song_title_for_merge(song_title: str) -> str:
 def artist_query_matches(artist_keys: set[str] | tuple[str, ...], query: str) -> bool:
     query_key = compact_key(query)
     if not query_key:
-        return True
+        return not query.strip()
     keys = [key for key in artist_keys if key]
     if not keys:
         return False

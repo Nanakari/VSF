@@ -1,0 +1,76 @@
+{
+  "channels": [
+    {"channel_id": "chan-a", "channel_title": "100%_Live"},
+    {"channel_id": "chan-b", "channel_title": "Beta Live"},
+    {"channel_id": "chan-c", "channel_title": "Gamma"}
+  ],
+  "videos": [
+    {"video_id": "a-new", "channel_id": "chan-a", "title": "A new set", "published_at": "2026-01-01T00:00:00Z", "url": "https://example.test/a-new", "indexed_at": "2026-01-02T00:00:00Z"},
+    {"video_id": "a-old", "channel_id": "chan-a", "title": "A old set", "published_at": "2025-01-01T00:00:00Z", "url": "https://example.test/a-old", "indexed_at": "2025-01-02T00:00:00Z"},
+    {"video_id": "b-one", "channel_id": "chan-b", "title": "B set", "published_at": "2025-06-01T00:00:00Z", "url": "https://example.test/b-one", "indexed_at": "2025-06-02T00:00:00Z"},
+    {"video_id": "c-one", "channel_id": "chan-c", "title": "C set", "published_at": "2024-06-01T00:00:00Z", "url": "https://example.test/c-one", "indexed_at": "2024-06-02T00:00:00Z"}
+  ],
+  "entries": [
+    {"id": 1, "song_id": 101, "video_id": "a-new", "seconds": 20, "timestamp_text": "00:20", "raw_song_title": "Stellar Stellar / Ado", "source_comment": "a-new"},
+    {"id": 2, "song_id": 102, "video_id": "a-new", "seconds": 10, "timestamp_text": "00:10", "raw_song_title": "Stellar Stellar—Live / Ado", "source_comment": "a-new"},
+    {"id": 3, "song_id": 103, "video_id": "a-new", "seconds": 30, "timestamp_text": "00:30", "raw_song_title": "Encore", "source_comment": "a-new"},
+    {"id": 4, "song_id": 104, "video_id": "a-new", "seconds": 40, "timestamp_text": "00:40", "raw_song_title": "abcdefghij / Ado", "source_comment": "a-new"},
+    {"id": 5, "song_id": 105, "video_id": "a-new", "seconds": 50, "timestamp_text": "00:50", "raw_song_title": "KING", "source_comment": "a-new"},
+    {"id": 6, "song_id": 101, "video_id": "a-old", "seconds": 5, "timestamp_text": "00:05", "raw_song_title": "Stellar Stellar / Ado", "source_comment": "a-old"},
+    {"id": 7, "song_id": 106, "video_id": "a-old", "seconds": 25, "timestamp_text": "00:25", "raw_song_title": "Encore / Ado", "source_comment": "a-old"},
+    {"id": 8, "song_id": 107, "video_id": "a-old", "seconds": 35, "timestamp_text": "00:35", "raw_song_title": "Starlight / Ado", "source_comment": "a-old"},
+    {"id": 9, "song_id": 108, "video_id": "a-old", "seconds": 45, "timestamp_text": "00:45", "raw_song_title": "Moon Song / YOASOBI / Ado", "source_comment": "a-old"},
+    {"id": 10, "song_id": 109, "video_id": "b-one", "seconds": 15, "timestamp_text": "00:15", "raw_song_title": "Stellar Stellar / Ado", "source_comment": "b-one"},
+    {"id": 11, "song_id": 110, "video_id": "b-one", "seconds": 45, "timestamp_text": "00:45", "raw_song_title": "Starlight / Ado", "source_comment": "b-one"},
+    {"id": 12, "song_id": 111, "video_id": "b-one", "seconds": 55, "timestamp_text": "00:55", "raw_song_title": "Different / YOASOBI", "source_comment": "b-one"},
+    {"id": 13, "song_id": 112, "video_id": "b-one", "seconds": 25, "timestamp_text": "00:25", "raw_song_title": "abcdefghij / Ado", "source_comment": "b-one"},
+    {"id": 14, "song_id": 113, "video_id": "c-one", "seconds": 5, "timestamp_text": "00:05", "raw_song_title": "Stellar Stellar / Ado", "source_comment": "c-one"},
+    {"id": 15, "song_id": 114, "video_id": "c-one", "seconds": 60, "timestamp_text": "01:00", "raw_song_title": "Alpha Song / Ado", "source_comment": "c-one"},
+    {"id": 16, "song_id": 115, "video_id": "c-one", "seconds": 70, "timestamp_text": "01:10", "raw_song_title": "Zebra Song / Ado", "source_comment": "c-one"},
+    {"id": 17, "song_id": 116, "video_id": "c-one", "seconds": 80, "timestamp_text": "01:20", "raw_song_title": "Beta Song / Ado", "source_comment": "c-one"}
+  ],
+  "songs": [
+    {"id": 101, "group_key": "stellarstellar::ado", "artist": "Ado", "title": "Stellar Stellar"},
+    {"id": 102, "group_key": "stellarstellar::ado", "artist": "Ado", "title": "Stellar Stellar—Live"},
+    {"id": 103, "group_key": "encore::ado", "artist": "", "title": "Encore"},
+    {"id": 104, "group_key": "abcdefghij::ado", "artist": "Ado", "title": "abcdefghij"},
+    {"id": 105, "group_key": "king::", "artist": "", "title": "KING"},
+    {"id": 106, "group_key": "encore::ado", "artist": "Ado", "title": "Encore"},
+    {"id": 107, "group_key": "starlight::ado", "artist": "Ado", "title": "Starlight"},
+    {"id": 108, "group_key": "moonsong::ado|yoasobi", "artist": "YOASOBI / Ado", "title": "Moon Song"},
+    {"id": 109, "group_key": "stellarstellar::ado", "artist": "Ado", "title": "Stellar Stellar"},
+    {"id": 110, "group_key": "starlight::ado", "artist": "Ado", "title": "Starlight"},
+    {"id": 111, "group_key": "different::yoasobi", "artist": "YOASOBI", "title": "Different"},
+    {"id": 112, "group_key": "abcdefghij::ado", "artist": "Ado", "title": "abcdefghij"},
+    {"id": 113, "group_key": "stellarstellar::ado", "artist": "Ado", "title": "Stellar Stellar"},
+    {"id": 114, "group_key": "alphasong::ado", "artist": "Ado", "title": "Alpha Song"},
+    {"id": 115, "group_key": "zebrasong::ado", "artist": "Ado", "title": "Zebra Song"},
+    {"id": 116, "group_key": "betasong::ado", "artist": "Ado", "title": "Beta Song"}
+  ],
+  "groups": [
+    {"group_key": "stellarstellar::ado", "song_title": "Stellar Stellar", "artist": "Ado", "normalized_titles": ["stellar stellar", "stellar stellar—live"], "compact_titles": ["stellarstellar"], "artist_search": "ado", "entry_count": 5, "channel_count": 3},
+    {"group_key": "encore::ado", "song_title": "Encore", "artist": "Ado", "normalized_titles": ["encore"], "compact_titles": ["encore"], "artist_search": "ado", "entry_count": 2, "channel_count": 1},
+    {"group_key": "abcdefghij::ado", "song_title": "abcdefghij", "artist": "Ado", "normalized_titles": ["abcdefghij"], "compact_titles": ["abcdefghij"], "artist_search": "ado", "entry_count": 2, "channel_count": 2},
+    {"group_key": "king::", "song_title": "KING", "artist": "", "normalized_titles": ["king"], "compact_titles": ["king"], "artist_search": "", "entry_count": 1, "channel_count": 1},
+    {"group_key": "starlight::ado", "song_title": "Starlight", "artist": "Ado", "normalized_titles": ["starlight"], "compact_titles": ["starlight"], "artist_search": "ado", "entry_count": 2, "channel_count": 2},
+    {"group_key": "moonsong::ado|yoasobi", "song_title": "Moon Song", "artist": "YOASOBI", "normalized_titles": ["moon song"], "compact_titles": ["moonsong"], "artist_search": "yoasobi ado", "entry_count": 1, "channel_count": 1},
+    {"group_key": "different::yoasobi", "song_title": "Different", "artist": "YOASOBI", "normalized_titles": ["different"], "compact_titles": ["different"], "artist_search": "yoasobi", "entry_count": 1, "channel_count": 1},
+    {"group_key": "alphasong::ado", "song_title": "Alpha Song", "artist": "Ado", "normalized_titles": ["alpha song"], "compact_titles": ["alphasong"], "artist_search": "ado", "entry_count": 1, "channel_count": 1},
+    {"group_key": "betasong::ado", "song_title": "Beta Song", "artist": "Ado", "normalized_titles": ["beta song"], "compact_titles": ["betasong"], "artist_search": "ado", "entry_count": 1, "channel_count": 1},
+    {"group_key": "zebrasong::ado", "song_title": "Zebra Song", "artist": "Ado", "normalized_titles": ["zebra song"], "compact_titles": ["zebrasong"], "artist_search": "ado", "entry_count": 1, "channel_count": 1}
+  ],
+  "queries": [
+    {"name": "compact", "song": "StellarStellar", "expected_groups": ["stellarstellar::ado"]},
+    {"name": "long-compact-substring", "song": "larste", "expected_groups": ["stellarstellar::ado"]},
+    {"name": "reverse-compact-substring", "song": "abcdefghijk", "expected_groups": ["abcdefghij::ado"]},
+    {"name": "typo-positive", "song": "Starligh", "expected_groups": ["starlight::ado"]},
+    {"name": "typo-negative", "song": "abefghij", "expected_groups": []},
+    {"name": "live-variant", "song": "Stellar Stellar", "expected_groups": ["stellarstellar::ado"]},
+    {"name": "short-substring-negative", "song": "ING", "expected_groups": []},
+    {"name": "unknown-author", "song": "Encore", "artist": "Ado", "expected_groups": ["encore::ado"], "expected_entry_count": 1},
+    {"name": "secondary-author", "song": "Moon Song", "artist": "YOASOBI", "expected_groups": ["moonsong::ado|yoasobi"]},
+    {"name": "literal-channel-filter", "song": "Stellar Stellar", "channel": "100%_Live", "expected_groups": ["stellarstellar::ado"], "expected_entry_count": 3},
+    {"name": "channel-filter", "song": "Stellar Stellar", "channel": "Beta", "expected_groups": ["stellarstellar::ado"], "expected_entry_count": 1},
+    {"name": "artist-only", "artist": "YOASOBI", "expected_groups": ["different::yoasobi", "moonsong::ado|yoasobi"]}
+  ]
+}

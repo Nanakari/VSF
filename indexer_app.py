@@ -153,6 +153,9 @@ def start_index():
         mode = "incremental" if request.form.get("incremental") == "on" else "full"
     if mode not in {"incremental", "full", "backfill"}:
         return jsonify({"ok": False, "message": "无效的索引模式。"}), 400
+    if not channel:
+        return jsonify({"ok": False, "message": "请填写频道 URL、handle 或 channel ID。"}), 400
+
     reset_backfill = request.form.get("reset_backfill") == "on"
     max_videos = parse_positive_int(request.form.get("max_videos"), DEFAULT_MAX_VIDEOS)
     max_comments = parse_positive_int(request.form.get("max_comments"), DEFAULT_MAX_COMMENTS)
@@ -161,42 +164,54 @@ def start_index():
         DEFAULT_RECENT_RESCAN_DAYS,
     )
 
-    if api_key:
-        try:
-            write_env_api_key(api_key)
-        except OSError:
-            logger.exception("Failed to save YouTube API key")
-            return jsonify({"ok": False, "message": "无法保存 YouTube Data API Key。"}), 500
-    else:
-        api_key = read_saved_api_key()
-
-    if not api_key:
-        return jsonify({"ok": False, "message": "请填写 YouTube Data API Key。"}), 400
-    if not channel:
-        return jsonify({"ok": False, "message": "请填写频道 URL、handle 或 channel ID。"}), 400
-
+    # Keep the running check and key persistence in one critical section.  A
+    # second /start request must observe the reservation before it can write a
+    # different key.  Do not hold this lock while starting the worker: the
+    # worker can finish immediately and its callbacks also use job_lock.
     with job_lock:
         if job_state["running"]:
             return jsonify({"ok": False, "message": "已有索引任务正在运行。"}), 409
+
+        if api_key:
+            try:
+                write_env_api_key(api_key)
+            except Exception:
+                logger.exception("Failed to save YouTube API key")
+                return jsonify({"ok": False, "message": "无法保存 YouTube Data API Key。"}), 500
+        else:
+            api_key = read_saved_api_key()
+
+        if not api_key:
+            return jsonify({"ok": False, "message": "请填写 YouTube Data API Key。"}), 400
+
         reset_job_state()
         job_state["running"] = True
         job_state["message"] = "索引任务已开始。"
 
-    worker = threading.Thread(
-        target=run_index_job,
-        args=(
-            api_key,
-            channel,
-            max_videos,
-            max_comments,
-            include_all,
-            mode,
-            reset_backfill,
-            recent_rescan_days,
-        ),
-        daemon=True,
-    )
-    worker.start()
+    try:
+        worker = threading.Thread(
+            target=run_index_job,
+            args=(
+                api_key,
+                channel,
+                max_videos,
+                max_comments,
+                include_all,
+                mode,
+                reset_backfill,
+                recent_rescan_days,
+            ),
+            daemon=True,
+        )
+        worker.start()
+    except Exception:
+        logger.exception("Failed to start indexer job")
+        with job_lock:
+            # A failed Thread construction/start must not leave the setup UI
+            # reporting a task that can never finish.
+            if job_state["running"]:
+                reset_job_state()
+        return jsonify({"ok": False, "message": "无法启动索引任务。"}), 500
     return jsonify({"ok": True, "message": "索引任务已开始。"})
 
 @app.get("/status")

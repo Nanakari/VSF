@@ -24,6 +24,20 @@
           <span>YouTube Data API Key</span>
           <input name="api_key" type="password" autocomplete="off" placeholder="{% if has_saved_api_key %}已保存，留空沿用当前配置{% else %}AIza...{% endif %}">
         </label>
+        <div class="setup-grid">
+          <label>
+            <span>站点地址（用于删除后同步）</span>
+            <input name="site_base_url" type="url" value="{{ site_base_url }}" placeholder="https://你的站点.chatgpt.site">
+          </label>
+          <label>
+            <span>站点同步令牌</span>
+            <input name="site_seed_token" type="password" autocomplete="new-password" placeholder="{% if has_saved_site_seed_token %}已保存，留空沿用当前配置{% else %}请输入 SEED_TOKEN{% endif %}">
+          </label>
+        </div>
+        <div class="setup-actions">
+          <button id="save-site-config" class="secondary-button" type="button">保存站点同步设置</button>
+          <span class="subtle">删除频道前必须配置，用于安全替换站点完整数据快照。</span>
+        </div>
         <label>
           <span>频道 URL / Handle / Channel ID</span>
           <input name="channel" placeholder="https://www.youtube.com/@Shairu.ch_0801">
@@ -64,6 +78,55 @@
         <button id="start-button" type="submit">开始索引</button>
       </form>
 
+      <section class="channel-management" aria-labelledby="channel-management-title">
+        <div class="section-heading">
+          <div>
+            <h2 id="channel-management-title">本地频道管理</h2>
+            <p class="subtle">删除会同时清理该频道的视频、歌曲、时间点和回填进度，并自动同步站点。</p>
+          </div>
+        </div>
+        {% if channels %}
+          <div class="managed-channel-grid">
+            {% for channel in channels %}
+              <article class="managed-channel-card">
+                <div>
+                  <strong>{{ channel.channel_title }}</strong>
+                  <span>{{ channel.video_count }} 个视频 · {{ channel.song_count }} 首歌曲 · {{ channel.entry_count }} 个时间点</span>
+                </div>
+                <button
+                  class="danger-button delete-channel-button"
+                  type="button"
+                  data-channel-id="{{ channel.channel_id }}"
+                  data-channel-title="{{ channel.channel_title }}"
+                  data-channel-video-count="{{ channel.video_count }}"
+                  data-channel-song-count="{{ channel.song_count }}"
+                  data-channel-entry-count="{{ channel.entry_count }}"
+                >删除频道</button>
+              </article>
+            {% endfor %}
+          </div>
+        {% else %}
+          <p class="empty">当前数据库还没有频道。</p>
+        {% endif %}
+      </section>
+
+      <dialog id="delete-dialog" class="delete-dialog">
+        <form id="delete-confirm-form" method="post" action="{{ url_for('delete_channel') }}">
+          <h2>确认删除频道</h2>
+          <p id="delete-dialog-summary" class="subtle"></p>
+          <p>请输入完整频道名称后继续。删除和站点同步开始后不能从界面撤销。</p>
+          <input id="delete-channel-id" name="channel_id" type="hidden">
+          <label>
+            <span>频道名称</span>
+            <input id="delete-confirmation" name="confirmation" autocomplete="off" required>
+          </label>
+          <div class="dialog-actions">
+            <button id="cancel-delete" class="secondary-button" type="button">取消</button>
+            <button class="danger-button" type="submit">确认删除并同步</button>
+          </div>
+        </form>
+      </dialog>
+
       <section class="setup-status" aria-live="polite">
         <div class="status-line">
           <strong id="status-message">等待开始索引。</strong>
@@ -85,10 +148,19 @@
       (() => {
         const form = document.querySelector("#index-form");
         const button = document.querySelector("#start-button");
+        const saveSiteConfigButton = document.querySelector("#save-site-config");
         const exitButton = document.querySelector("#exit-button");
         const message = document.querySelector("#status-message");
         const log = document.querySelector("#job-log");
+        const deleteDialog = document.querySelector("#delete-dialog");
+        const deleteConfirmForm = document.querySelector("#delete-confirm-form");
+        const deleteChannelId = document.querySelector("#delete-channel-id");
+        const deleteConfirmation = document.querySelector("#delete-confirmation");
+        const deleteDialogSummary = document.querySelector("#delete-dialog-summary");
+        const cancelDelete = document.querySelector("#cancel-delete");
+        let deleteChannelTitle = "";
         let formError = "";
+        let reloadAfterDelete = false;
         const statMap = {
           videos_seen: document.querySelector("#videos-seen"),
           videos_indexed: document.querySelector("#videos-indexed"),
@@ -121,6 +193,71 @@
             formError = "无法连接更新服务，请重新打开更新页面。";
             button.disabled = false;
             message.textContent = formError;
+          }
+        });
+
+        saveSiteConfigButton.addEventListener("click", async () => {
+          saveSiteConfigButton.disabled = true;
+          message.textContent = "正在保存站点同步设置...";
+          try {
+            const response = await fetch("{{ url_for('save_site_config') }}", {
+              method: "POST",
+              body: new FormData(form)
+            });
+            const data = await response.json().catch(() => ({}));
+            message.textContent = data.message || (response.ok ? "站点同步设置已保存。" : "保存失败。");
+          } catch (_) {
+            message.textContent = "无法连接更新服务，设置未保存。";
+          } finally {
+            saveSiteConfigButton.disabled = false;
+          }
+        });
+
+        document.querySelectorAll(".delete-channel-button").forEach((deleteButton) => {
+          deleteButton.addEventListener("click", () => {
+            deleteChannelTitle = deleteButton.dataset.channelTitle || "";
+            deleteChannelId.value = deleteButton.dataset.channelId || "";
+            deleteConfirmation.value = "";
+            deleteDialogSummary.textContent = `将删除“${deleteChannelTitle}”及其 ${deleteButton.dataset.channelVideoCount || 0} 个视频、${deleteButton.dataset.channelSongCount || 0} 首歌曲和 ${deleteButton.dataset.channelEntryCount || 0} 个时间点。`;
+            deleteDialog.showModal();
+            deleteConfirmation.focus();
+          });
+        });
+
+        cancelDelete.addEventListener("click", () => deleteDialog.close());
+
+        deleteConfirmForm.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          if (deleteConfirmation.value !== deleteChannelTitle) {
+            message.textContent = "频道名称不匹配，未执行删除。";
+            deleteConfirmation.focus();
+            return;
+          }
+          const submitButton = deleteConfirmForm.querySelector("button[type='submit']");
+          submitButton.disabled = true;
+          message.textContent = "正在删除频道并同步站点...";
+          try {
+            const deleteData = new FormData(deleteConfirmForm);
+            // Allow a freshly entered site configuration to be used even if
+            // the user did not click the separate save button first.
+            deleteData.append("site_base_url", form.elements.site_base_url.value);
+            deleteData.append("site_seed_token", form.elements.site_seed_token.value);
+            const response = await fetch(deleteConfirmForm.action, {
+              method: "POST",
+              body: deleteData
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+              message.textContent = data.message || "删除任务启动失败。";
+              submitButton.disabled = false;
+              return;
+            }
+            deleteDialog.close();
+            reloadAfterDelete = true;
+            message.textContent = data.message || "删除任务已开始。";
+          } catch (_) {
+            message.textContent = "无法连接更新服务，未确认删除任务状态。";
+            submitButton.disabled = false;
           }
         });
 
@@ -159,6 +296,14 @@
           log.textContent = (data.log || []).join("\n");
           log.scrollTop = log.scrollHeight;
           button.disabled = Boolean(data.running);
+          saveSiteConfigButton.disabled = Boolean(data.running);
+          document.querySelectorAll(".delete-channel-button").forEach((deleteButton) => {
+            deleteButton.disabled = Boolean(data.running);
+          });
+          if (reloadAfterDelete && data.operation === "delete-channel" && data.done && !data.running) {
+            reloadAfterDelete = false;
+            if (data.ok) window.setTimeout(() => window.location.reload(), 1200);
+          }
         };
 
         window.setInterval(refreshStatus, 1500);

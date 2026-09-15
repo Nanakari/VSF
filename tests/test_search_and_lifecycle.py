@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -62,6 +63,55 @@ class SearchAndLifecycleTests(unittest.TestCase):
             ("video",),
         ).fetchall()
         self.assertEqual([(row["raw_song_title"], row["source_comment"]) for row in rows], [("Old Song", "old timeline")])
+        db.close()
+
+    def test_delete_channel_cascades_local_data_in_one_transaction(self):
+        db = SongDatabase(":memory:")
+        db.init_schema()
+        db.upsert_channel("channel-a", "Channel A")
+        db.upsert_channel("channel-b", "Channel B")
+        db.upsert_video("video-a", "channel-a", "歌枠 A", "2026-01-01")
+        db.upsert_video("video-b", "channel-b", "歌枠 B", "2026-01-02")
+        db.insert_song_entries("video-a", [entry("Old Song", 1)], "timeline")
+        db.update_backfill_cursor("channel-a", "2026-01-01", "video-a")
+
+        deleted = db.delete_channel("channel-a")
+
+        self.assertEqual(deleted["channel_title"], "Channel A")
+        self.assertEqual(deleted["videos"], 1)
+        self.assertEqual(deleted["songs"], 1)
+        self.assertEqual(deleted["entries"], 1)
+        self.assertIsNone(db.get_channel("channel-a"))
+        self.assertIsNotNone(db.get_channel("channel-b"))
+        self.assertIsNone(db.get_video_index_state("video-a"))
+        self.assertEqual(db.conn.execute("SELECT COUNT(*) FROM songs").fetchone()[0], 0)
+        self.assertEqual(db.conn.execute("SELECT COUNT(*) FROM song_entries").fetchone()[0], 0)
+        self.assertIsNone(db.get_backfill_state("channel-a"))
+        db.close()
+
+    def test_delete_channel_rolls_back_when_a_child_delete_fails(self):
+        db = SongDatabase(":memory:")
+        db.init_schema()
+        db.upsert_channel("channel", "Channel")
+        db.upsert_video("video", "channel", "歌枠", "2026-01-01")
+        db.insert_song_entries("video", [entry("Song", 1)], "timeline")
+        db.conn.execute(
+            """
+            CREATE TRIGGER block_video_delete
+            BEFORE DELETE ON videos
+            BEGIN
+                SELECT RAISE(ABORT, 'blocked for test');
+            END
+            """
+        )
+        db.conn.commit()
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.delete_channel("channel")
+
+        self.assertIsNotNone(db.get_channel("channel"))
+        self.assertIsNotNone(db.get_video_index_state("video"))
+        self.assertEqual(db.conn.execute("SELECT COUNT(*) FROM song_entries").fetchone()[0], 1)
         db.close()
 
     def test_search_clients_are_not_expired_by_heartbeat_gap(self):

@@ -1163,6 +1163,82 @@ class SongDatabase:
         )
         return list(cursor.fetchall())
 
+    def get_channel(self, channel_id: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            """
+            SELECT channel_id, channel_title
+            FROM channels
+            WHERE channel_id = ?
+            """,
+            (channel_id,),
+        ).fetchone()
+
+    def delete_channel(self, channel_id: str) -> dict[str, object] | None:
+        """Delete one channel and all of its dependent local data atomically."""
+        channel = self.get_channel(channel_id)
+        if channel is None:
+            return None
+
+        video_count = int(
+            self.conn.execute(
+                "SELECT COUNT(*) AS count FROM videos WHERE channel_id = ?",
+                (channel_id,),
+            ).fetchone()["count"]
+        )
+        song_count = int(
+            self.conn.execute(
+                "SELECT COUNT(*) AS count FROM songs WHERE channel_id = ?",
+                (channel_id,),
+            ).fetchone()["count"]
+        )
+        entry_count = int(
+            self.conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM song_entries
+                WHERE video_id IN (
+                    SELECT video_id FROM videos WHERE channel_id = ?
+                )
+                OR song_id IN (
+                    SELECT id FROM songs WHERE channel_id = ?
+                )
+                """,
+                (channel_id, channel_id),
+            ).fetchone()["count"]
+        )
+
+        # Foreign keys intentionally do not use ON DELETE CASCADE in the
+        # schema. Delete children explicitly in dependency order so this
+        # operation remains safe and rolls back as one unit on any error.
+        with self.conn:
+            self.conn.execute(
+                """
+                DELETE FROM song_entries
+                WHERE video_id IN (
+                    SELECT video_id FROM videos WHERE channel_id = ?
+                )
+                OR song_id IN (
+                    SELECT id FROM songs WHERE channel_id = ?
+                )
+                """,
+                (channel_id, channel_id),
+            )
+            self.conn.execute("DELETE FROM songs WHERE channel_id = ?", (channel_id,))
+            self.conn.execute("DELETE FROM videos WHERE channel_id = ?", (channel_id,))
+            self.conn.execute(
+                "DELETE FROM channel_index_state WHERE channel_id = ?",
+                (channel_id,),
+            )
+            self.conn.execute("DELETE FROM channels WHERE channel_id = ?", (channel_id,))
+
+        return {
+            "channel_id": channel_id,
+            "channel_title": str(channel["channel_title"]),
+            "videos": video_count,
+            "songs": song_count,
+            "entries": entry_count,
+        }
+
     def prune_non_song_entries(self) -> int:
         rows = self.conn.execute(
             """

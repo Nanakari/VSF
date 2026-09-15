@@ -216,6 +216,118 @@ button:disabled {
   padding: 0;
 }
 
+.setup-actions,
+.dialog-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.setup-actions .subtle {
+  margin-top: 0;
+}
+
+.channel-management {
+  display: grid;
+  gap: 12px;
+  margin-top: 22px;
+}
+
+.section-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.section-heading h2 {
+  font-size: 20px;
+}
+
+.managed-channel-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.managed-channel-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.managed-channel-card > div {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.managed-channel-card strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 16px;
+}
+
+.managed-channel-card span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.danger-button {
+  flex: 0 0 auto;
+  width: auto;
+  min-width: 96px;
+  padding: 0 14px;
+  background: #a53b3b;
+}
+
+.danger-button:hover {
+  background: #852e2e;
+}
+
+.delete-dialog {
+  width: min(520px, calc(100% - 32px));
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 22px;
+  color: var(--text);
+  background: var(--panel);
+  box-shadow: 0 20px 60px rgba(17, 24, 39, 0.22);
+}
+
+.delete-dialog::backdrop {
+  background: rgba(17, 24, 39, 0.42);
+}
+
+.delete-dialog h2 {
+  margin-bottom: 10px;
+  font-size: 20px;
+}
+
+.delete-dialog p {
+  margin-bottom: 12px;
+  line-height: 1.55;
+}
+
+.delete-dialog label {
+  margin-top: 16px;
+}
+
+.dialog-actions {
+  justify-content: flex-end;
+  margin-top: 18px;
+}
+
+.dialog-actions .secondary-button {
+  min-width: 72px;
+}
+
 .setup-status {
   display: grid;
   gap: 12px;
@@ -575,6 +687,15 @@ a:hover {
     grid-template-columns: 1fr;
   }
 
+  .managed-channel-card {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .managed-channel-card .danger-button {
+    width: 100%;
+  }
+
   .song-group > summary,
   .list-head {
     grid-template-columns: 24px minmax(0, 1fr) minmax(80px, 110px);
@@ -585,5 +706,4 @@ a:hover {
     padding: 10px;
   }
 }
-
 

@@ -59,7 +59,11 @@ Copy-Item .env.example .env
 
 ```env
 YOUTUBE_API_KEY=your_api_key_here
+SITE_BASE_URL=https://your-site.chatgpt.site
+SITE_SEED_TOKEN=your_site_seed_token_here
 ```
+
+`SITE_BASE_URL` 和 `SITE_SEED_TOKEN` 由本地设置工具用于删除频道后的站点快照同步。`SITE_SEED_TOKEN` 必须与站点 Worker 的 `SEED_TOKEN` 保持一致；令牌只保存在本地 `.env`，不会写入网页或日志。
 
 ## 命令行使用
 
@@ -232,6 +236,7 @@ logs/app.log
 - 填写自己的 YouTube Data API Key。
 - 输入频道 URL、handle 或 channel ID。
 - 点击“开始索引”，索引结果会写入同目录的 `vtuber_songs.sqlite3`。
+- 设置站点地址和同步令牌后，可在页面的“本地频道管理”中删除频道。删除前必须输入完整频道名称确认；本地数据会在一个事务中级联清理，随后生成完整快照并通过站点的原子切换流程同步。同步失败时线上仍保留旧快照，本地页面会显示失败原因。
 - 完成后再打开 `VTuberSongFinder.exe` 搜索。
 
 设置工具提交索引前会先校验频道和索引模式，再在任务锁内检查是否已有任务；校验失败或任务冲突时不会写入 `.env` 或修改运行中的 API Key。保存 Key 失败会返回错误且不会留下“正在运行”的任务状态；并发提交时只有一个请求能够保存 Key 并启动索引。
@@ -255,6 +260,7 @@ vtuber_song_finder/
 ├── app.py
 ├── main.py
 ├── youtube_client.py
+├── site_sync.py
 ├── timeline_parser.py
 ├── database.py
 ├── search.py

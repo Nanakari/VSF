@@ -18,9 +18,17 @@ import webbrowser
 from flask import Flask, Response, abort, jsonify, redirect, render_template, request, url_for
 from werkzeug.exceptions import HTTPException
 
-from config import get_app_dir, get_database_path, get_resource_dir, get_youtube_api_key
+from config import (
+    get_app_dir,
+    get_database_path,
+    get_resource_dir,
+    get_site_base_url,
+    get_site_seed_token,
+    get_youtube_api_key,
+)
 from database import SongDatabase
 from main import DEFAULT_RECENT_RESCAN_DAYS, IndexStats, run_index_channel
+from site_sync import sync_database_to_site
 from youtube_client import (
     QuotaExceededError,
     YouTubeAPIError,
@@ -42,6 +50,7 @@ job_state: dict[str, object] = {
     "running": False,
     "done": False,
     "ok": False,
+    "operation": "idle",
     "message": "等待开始索引。",
     "log": [],
     "stats": {},
@@ -119,11 +128,21 @@ def require_local_management() -> None:
 
 @app.route("/")
 def index():
+    db = SongDatabase(get_database_path())
+    db.init_schema()
+    try:
+        channels = [dict(row) for row in db.list_channels()]
+    finally:
+        db.close()
+
     return render_template(
         "indexer.html",
         default_max_videos=DEFAULT_MAX_VIDEOS,
         default_max_comments=DEFAULT_MAX_COMMENTS,
         default_recent_rescan_days=DEFAULT_RECENT_RESCAN_DAYS,
+        channels=channels,
+        site_base_url=read_saved_site_base_url(),
+        has_saved_site_seed_token=bool(read_saved_site_seed_token()),
         auto_exit_enabled=AUTO_EXIT_ENABLED,
         search_url=url_for("open_search"),
         has_saved_api_key=bool(read_saved_api_key()),
@@ -186,6 +205,7 @@ def start_index():
 
         reset_job_state()
         job_state["running"] = True
+        job_state["operation"] = "index"
         job_state["message"] = "索引任务已开始。"
 
     try:
@@ -213,6 +233,91 @@ def start_index():
                 reset_job_state()
         return jsonify({"ok": False, "message": "无法启动索引任务。"}), 500
     return jsonify({"ok": True, "message": "索引任务已开始。"})
+
+
+@app.post("/save-site-config")
+def save_site_config():
+    require_local_management()
+    base_url = request.form.get("site_base_url", "").strip()
+    seed_token = request.form.get("site_seed_token", "").strip()
+    if not base_url:
+        base_url = read_saved_site_base_url()
+    if not seed_token:
+        seed_token = read_saved_site_seed_token()
+    try:
+        save_site_sync_config(base_url, seed_token)
+    except ValueError as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 400
+    except OSError:
+        logger.exception("Failed to save Site sync configuration")
+        return jsonify({"ok": False, "message": "无法保存站点同步配置。"}), 500
+    return jsonify({"ok": True, "message": "站点同步配置已保存。"})
+
+
+@app.post("/delete-channel")
+def delete_channel():
+    require_local_management()
+    channel_id = request.form.get("channel_id", "").strip()
+    confirmation = request.form.get("confirmation", "").strip()
+    if not channel_id:
+        return jsonify({"ok": False, "message": "缺少频道 ID。"}), 400
+    if is_index_job_running():
+        return jsonify({"ok": False, "message": "索引任务正在运行，暂时不能删除频道。"}), 409
+
+    db = SongDatabase(get_database_path())
+    try:
+        db.init_schema()
+        channel = db.get_channel(channel_id)
+    finally:
+        db.close()
+    if channel is None:
+        return jsonify({"ok": False, "message": "频道不存在，可能已经被删除。"}), 404
+    if confirmation != channel["channel_title"]:
+        return jsonify({"ok": False, "message": "确认名称不匹配，未执行删除。"}), 400
+
+    base_url = request.form.get("site_base_url", "").strip() or read_saved_site_base_url()
+    seed_token = request.form.get("site_seed_token", "").strip() or read_saved_site_seed_token()
+    try:
+        base_url = normalize_site_base_url(base_url)
+    except ValueError as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 400
+    if not seed_token:
+        return jsonify(
+            {
+                "ok": False,
+                "message": "请先配置站点同步令牌，删除后系统会自动同步站点数据。",
+            }
+        ), 400
+
+    if request.form.get("site_base_url", "").strip() or request.form.get("site_seed_token", "").strip():
+        try:
+            save_site_sync_config(base_url, seed_token)
+        except (OSError, ValueError) as exc:
+            logger.exception("Failed to save Site sync configuration before deletion")
+            return jsonify({"ok": False, "message": str(exc) or "无法保存站点同步配置。"}), 400
+
+    with job_lock:
+        if job_state["running"]:
+            return jsonify({"ok": False, "message": "已有任务正在运行。"}), 409
+        reset_job_state()
+        job_state["running"] = True
+        job_state["operation"] = "delete-channel"
+        job_state["message"] = f"正在准备删除频道：{channel['channel_title']}。"
+
+    try:
+        worker = threading.Thread(
+            target=run_delete_channel_job,
+            args=(channel_id, str(channel["channel_title"]), base_url, seed_token),
+            daemon=True,
+        )
+        worker.start()
+    except Exception:
+        logger.exception("Failed to start channel deletion job")
+        with job_lock:
+            if job_state["running"]:
+                reset_job_state()
+        return jsonify({"ok": False, "message": "无法启动删除任务。"}), 500
+    return jsonify({"ok": True, "message": "删除任务已开始，正在同步站点数据。"}), 202
 
 @app.get("/status")
 def status():
@@ -322,12 +427,66 @@ def run_index_job(
             db.close()
 
 
+def run_delete_channel_job(
+    channel_id: str,
+    channel_title: str,
+    site_base_url: str,
+    site_seed_token: str,
+) -> None:
+    db: SongDatabase | None = None
+    deleted: dict[str, object] | None = None
+    try:
+        db = SongDatabase(get_database_path())
+        db.init_schema()
+        deleted = db.delete_channel(channel_id)
+        if deleted is None:
+            finish_job(False, f"频道已不存在：{channel_title}", IndexStats())
+            return
+        add_log(
+            f"本地已删除频道 {channel_title}："
+            f"{deleted['videos']} 个视频、{deleted['songs']} 首歌曲、"
+            f"{deleted['entries']} 个时间点。"
+        )
+    except Exception as exc:
+        logger.exception("Channel deletion failed")
+        finish_job(False, f"删除频道失败：{exc}", IndexStats())
+        return
+    finally:
+        if db is not None:
+            db.close()
+
+    try:
+        add_log("正在生成并上传站点完整快照，请稍候。")
+        manifest = sync_database_to_site(
+            get_database_path(),
+            site_base_url,
+            site_seed_token,
+            get_app_dir() / "build" / "d1-seed",
+            on_message=add_log,
+        )
+        tables = manifest.get("tables", {})
+        finish_job(
+            True,
+            f"频道 {channel_title} 已删除，站点同步完成（{tables.get('channels', 0)} 个频道）。",
+            IndexStats(),
+        )
+    except Exception as exc:
+        logger.exception("Site resync after channel deletion failed")
+        finish_job(
+            False,
+            f"频道 {channel_title} 已从本地删除，但站点同步失败：{exc}。"
+            "可确认站点配置后重新导入快照。",
+            IndexStats(),
+        )
+
+
 def reset_job_state() -> None:
     job_state.update(
         {
             "running": False,
             "done": False,
             "ok": False,
+            "operation": "idle",
             "message": "等待开始索引。",
             "log": [],
             "stats": {},
@@ -386,38 +545,90 @@ def read_saved_api_key() -> str:
     except RuntimeError:
         return ""
 
+
+def read_saved_site_base_url() -> str:
+    return get_site_base_url()
+
+
+def read_saved_site_seed_token() -> str:
+    return get_site_seed_token()
+
+
+def normalize_site_base_url(value: str) -> str:
+    from urllib.parse import urlparse
+
+    base_url = value.strip().rstrip("/")
+    parsed = urlparse(base_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("站点地址必须是完整的 http:// 或 https:// URL。")
+    if parsed.query or parsed.fragment:
+        raise ValueError("站点地址不能包含查询参数或片段。")
+    return base_url
+
+
+def save_site_sync_config(base_url: str, seed_token: str) -> None:
+    base_url = normalize_site_base_url(base_url)
+    if not seed_token or "\r" in seed_token or "\n" in seed_token:
+        raise ValueError("站点同步令牌不能为空，且必须是单行文本。")
+    write_env_values(
+        {
+            "SITE_BASE_URL": base_url,
+            "SITE_SEED_TOKEN": seed_token,
+        }
+    )
+
+
 def write_env_api_key(api_key: str) -> None:
     if not api_key or "\r" in api_key or "\n" in api_key:
         raise ValueError("API key must be a single non-empty line")
+    write_env_values({"YOUTUBE_API_KEY": api_key})
+
+
+def write_env_values(values: dict[str, str]) -> None:
+    for key, value in values.items():
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            raise ValueError("Invalid environment variable name")
+        if not value or "\r" in value or "\n" in value:
+            raise ValueError(f"{key} must be a single non-empty line")
+
     env_path = get_app_dir() / ".env"
     env_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        original = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
-    except OSError:
-        raise
+    original = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
 
     newline = "\r\n" if "\r\n" in original else "\n"
-    assignment = re.compile(r"^\s*(?:export\s+)?YOUTUBE_API_KEY\s*=")
+    assignments = {
+        key: re.compile(rf"^\s*(?:export\s+)?{re.escape(key)}\s*=")
+        for key in values
+    }
     lines = original.splitlines(keepends=True)
     updated: list[str] = []
-    replaced = False
+    replaced = {key: False for key in values}
     for line in lines:
-        if assignment.match(line.rstrip("\r\n")):
-            if not replaced:
-                updated.append(f"YOUTUBE_API_KEY={api_key}{newline}")
-                replaced = True
+        match_key = next(
+            (
+                key
+                for key, assignment in assignments.items()
+                if assignment.match(line.rstrip("\r\n"))
+            ),
+            None,
+        )
+        if match_key is not None:
+            if not replaced[match_key]:
+                updated.append(f"{match_key}={values[match_key]}{newline}")
+                replaced[match_key] = True
             continue
         updated.append(line)
 
-    if not replaced:
-        if updated and not original.endswith(("\n", "\r")):
-            updated.append(newline)
-        updated.append(f"YOUTUBE_API_KEY={api_key}{newline}")
+    for key, value in values.items():
+        if not replaced[key]:
+            if updated and not "".join(updated).endswith(("\n", "\r")):
+                updated.append(newline)
+            updated.append(f"{key}={value}{newline}")
     with env_path.open("w", encoding="utf-8", newline="") as env_file:
         env_file.write("".join(updated))
     # python-dotenv intentionally does not override an existing process value.
     # Keep the running setup process in sync with the value just saved.
-    os.environ["YOUTUBE_API_KEY"] = api_key
+    os.environ.update(values)
 
 
 def parse_positive_int(value: str | None, default: int) -> int:

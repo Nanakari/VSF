@@ -41,6 +41,16 @@ def get_youtube_api_key() -> str:
     return api_key
 
 
+def get_site_base_url() -> str:
+    load_config()
+    return os.getenv("SITE_BASE_URL", "").strip().rstrip("/")
+
+
+def get_site_seed_token() -> str:
+    load_config()
+    return os.getenv("SITE_SEED_TOKEN", "").strip()
+
+
 def get_database_path(db_path: str | None = None) -> Path:
     if db_path:
         return Path(db_path).expanduser().resolve()

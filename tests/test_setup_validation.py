@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import indexer_app
+from database import SongDatabase
 
 
 class SetupValidationTests(unittest.TestCase):
@@ -166,6 +167,74 @@ class SetupValidationTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 500)
+        self.assertFalse(self._state()["running"])
+
+    def test_delete_channel_requires_exact_confirmation_and_site_sync_config(self):
+        db_path = self.app_dir / "songs.sqlite3"
+        db = SongDatabase(db_path)
+        db.init_schema()
+        db.upsert_channel("channel", "Test Channel")
+        db.close()
+
+        with patch.object(indexer_app, "get_database_path", return_value=db_path), patch.object(
+            indexer_app, "read_saved_site_base_url", return_value=""
+        ), patch.object(indexer_app, "read_saved_site_seed_token", return_value=""):
+            client = self._authorized_client()
+            wrong = client.post(
+                "/delete-channel",
+                data={"channel_id": "channel", "confirmation": "wrong"},
+            )
+            missing_sync = client.post(
+                "/delete-channel",
+                data={"channel_id": "channel", "confirmation": "Test Channel"},
+            )
+
+        self.assertEqual(wrong.status_code, 400)
+        self.assertEqual(missing_sync.status_code, 400)
+        db = SongDatabase(db_path)
+        db.init_schema()
+        self.assertIsNotNone(db.get_channel("channel"))
+        db.close()
+
+    def test_delete_channel_removes_local_data_and_starts_site_resync(self):
+        class ImmediateWorker:
+            def __init__(self, *args, **kwargs):
+                self.args = args
+                self.kwargs = kwargs
+
+            def start(self):
+                self.kwargs["target"](*self.kwargs["args"])
+
+        db_path = self.app_dir / "songs.sqlite3"
+        db = SongDatabase(db_path)
+        db.init_schema()
+        db.upsert_channel("channel", "Test Channel")
+        db.upsert_video("video", "channel", "歌枠", "2026-01-01")
+        db.close()
+        sync = Mock(return_value={"tables": {"channels": 0}})
+
+        with patch.object(indexer_app, "get_database_path", return_value=db_path), patch.object(
+            indexer_app, "get_app_dir", return_value=self.app_dir
+        ), patch.object(indexer_app, "read_saved_site_base_url", return_value="https://site.test"), patch.object(
+            indexer_app, "read_saved_site_seed_token", return_value="secret"
+        ), patch.object(indexer_app, "sync_database_to_site", sync), patch.object(
+            indexer_app.threading, "Thread", ImmediateWorker
+        ):
+            client = self._authorized_client()
+            response = client.post(
+                "/delete-channel",
+                data={"channel_id": "channel", "confirmation": "Test Channel"},
+            )
+
+        self.assertEqual(response.status_code, 202)
+        sync.assert_called_once()
+        self.assertEqual(sync.call_args.args[:3], (db_path, "https://site.test", "secret"))
+        self.assertEqual(sync.call_args.args[3], self.app_dir / "build" / "d1-seed")
+        db = SongDatabase(db_path)
+        db.init_schema()
+        self.assertIsNone(db.get_channel("channel"))
+        db.close()
+        self.assertTrue(self._state()["ok"])
         self.assertFalse(self._state()["running"])
 
     def test_concurrent_starts_allow_only_one_key_save_and_worker(self):

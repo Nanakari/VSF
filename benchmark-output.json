@@ -1,0 +1,225 @@
+{
+  "command": "python scripts/benchmark_search.py --repeats 3",
+  "seed": 20260915,
+  "repeats": 3,
+  "environment": {
+    "python": "3.10.18",
+    "platform": "Windows-10-10.0.19045-SP0",
+    "machine": "AMD64",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel",
+    "cpu_count": 8
+  },
+  "collision_probe": {
+    "indexed_label": "fuzzy-first",
+    "linear_label": "fuzzy-first",
+    "equivalent": true
+  },
+  "sizes": [
+    {
+      "name": "3000 songs / 20000 entries",
+      "songs": 3000,
+      "entries": 20000,
+      "cases": [
+        {
+          "case": "channel + song + artist",
+          "query": {
+            "channel_query": "Channel 000",
+            "song_query": "catalog song",
+            "artist_query": "artist"
+          },
+          "groups": {
+            "indexed": 25,
+            "reference": 25
+          },
+          "result_fingerprints": {
+            "indexed": [
+              "9018ac057e0b0c8e4c50",
+              "9018ac057e0b0c8e4c50",
+              "9018ac057e0b0c8e4c50"
+            ],
+            "reference": [
+              "9018ac057e0b0c8e4c50",
+              "9018ac057e0b0c8e4c50",
+              "9018ac057e0b0c8e4c50"
+            ]
+          },
+          "fingerprints_equal": true,
+          "indexed": {
+            "p50_ms": 58.13,
+            "max_ms": 61.284
+          },
+          "reference": {
+            "p50_ms": 63.755,
+            "max_ms": 68.937
+          },
+          "reference_over_indexed_p50": 1.097
+        },
+        {
+          "case": "cross-channel",
+          "query": {},
+          "groups": {
+            "indexed": 1500,
+            "reference": 1500
+          },
+          "result_fingerprints": {
+            "indexed": [
+              "4fd59545b05b3945c3ed",
+              "4fd59545b05b3945c3ed",
+              "4fd59545b05b3945c3ed"
+            ],
+            "reference": [
+              "4fd59545b05b3945c3ed",
+              "4fd59545b05b3945c3ed",
+              "4fd59545b05b3945c3ed"
+            ]
+          },
+          "fingerprints_equal": true,
+          "indexed": {
+            "p50_ms": 1209.494,
+            "max_ms": 1241.547
+          },
+          "reference": {
+            "p50_ms": 2812.022,
+            "max_ms": 2926.576
+          },
+          "reference_over_indexed_p50": 2.325
+        },
+        {
+          "case": "song only",
+          "query": {
+            "song_query": "catalog song"
+          },
+          "groups": {
+            "indexed": 750,
+            "reference": 750
+          },
+          "result_fingerprints": {
+            "indexed": [
+              "7165af926e8b05767d83",
+              "7165af926e8b05767d83",
+              "7165af926e8b05767d83"
+            ],
+            "reference": [
+              "7165af926e8b05767d83",
+              "7165af926e8b05767d83",
+              "7165af926e8b05767d83"
+            ]
+          },
+          "fingerprints_equal": true,
+          "indexed": {
+            "p50_ms": 1150.287,
+            "max_ms": 1245.805
+          },
+          "reference": {
+            "p50_ms": 2248.217,
+            "max_ms": 2352.922
+          },
+          "reference_over_indexed_p50": 1.954
+        }
+      ]
+    },
+    {
+      "name": "10000 songs / 100000 entries",
+      "songs": 10000,
+      "entries": 100000,
+      "cases": [
+        {
+          "case": "channel + song + artist",
+          "query": {
+            "channel_query": "Channel 000",
+            "song_query": "catalog song",
+            "artist_query": "artist"
+          },
+          "groups": {
+            "indexed": 79,
+            "reference": 79
+          },
+          "result_fingerprints": {
+            "indexed": [
+              "8c1592b07aee80d5c042",
+              "8c1592b07aee80d5c042",
+              "8c1592b07aee80d5c042"
+            ],
+            "reference": [
+              "8c1592b07aee80d5c042",
+              "8c1592b07aee80d5c042",
+              "8c1592b07aee80d5c042"
+            ]
+          },
+          "fingerprints_equal": true,
+          "indexed": {
+            "p50_ms": 235.391,
+            "max_ms": 243.843
+          },
+          "reference": {
+            "p50_ms": 258.825,
+            "max_ms": 265.135
+          },
+          "reference_over_indexed_p50": 1.1
+        },
+        {
+          "case": "cross-channel",
+          "query": {},
+          "groups": {
+            "indexed": 5000,
+            "reference": 5000
+          },
+          "result_fingerprints": {
+            "indexed": [
+              "2c63d855138f7e531d3e",
+              "2c63d855138f7e531d3e",
+              "2c63d855138f7e531d3e"
+            ],
+            "reference": [
+              "2c63d855138f7e531d3e",
+              "2c63d855138f7e531d3e",
+              "2c63d855138f7e531d3e"
+            ]
+          },
+          "fingerprints_equal": true,
+          "indexed": {
+            "p50_ms": 4075.39,
+            "max_ms": 4213.426
+          },
+          "reference": {
+            "p50_ms": 23192.611,
+            "max_ms": 23362.591
+          },
+          "reference_over_indexed_p50": 5.691
+        },
+        {
+          "case": "song only",
+          "query": {
+            "song_query": "catalog song"
+          },
+          "groups": {
+            "indexed": 2500,
+            "reference": 2500
+          },
+          "result_fingerprints": {
+            "indexed": [
+              "46ddcdb87714a2ef83b6",
+              "46ddcdb87714a2ef83b6",
+              "46ddcdb87714a2ef83b6"
+            ],
+            "reference": [
+              "46ddcdb87714a2ef83b6",
+              "46ddcdb87714a2ef83b6",
+              "46ddcdb87714a2ef83b6"
+            ]
+          },
+          "fingerprints_equal": true,
+          "indexed": {
+            "p50_ms": 4099.262,
+            "max_ms": 4204.014
+          },
+          "reference": {
+            "p50_ms": 16479.866,
+            "max_ms": 17774.291
+          },
+          "reference_over_indexed_p50": 4.02
+        }
+      ]
+    }
+  ]
+}

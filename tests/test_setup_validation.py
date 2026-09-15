@@ -143,11 +143,116 @@ class SetupValidationTests(unittest.TestCase):
         self.assertEqual(worker.kwargs["target"], indexer_app.run_index_job)
         self.assertEqual(
             worker.kwargs["args"],
-            ("new-key", "@channel", 3, 4, False, "backfill", True, 5),
+            ("new-key", "@channel", 3, 4, False, "backfill", True, 5, "", ""),
         )
         self.assertEqual(worker.kwargs["daemon"], True)
         self.assertIn("YOUTUBE_API_KEY=new-key", (self.app_dir / ".env").read_text(encoding="utf-8"))
         self.assertTrue(self._state()["running"])
+
+    def test_start_index_passes_entered_site_config_to_worker(self):
+        class FakeWorker:
+            instances: list["FakeWorker"] = []
+
+            def __init__(self, *args, **kwargs):
+                self.args = args
+                self.kwargs = kwargs
+                self.instances.append(self)
+
+            def start(self):
+                pass
+
+        client = self._authorized_client()
+        with patch.object(indexer_app, "get_app_dir", return_value=self.app_dir), patch.object(
+            indexer_app.threading, "Thread", FakeWorker
+        ), patch.dict(os.environ, {}, clear=False):
+            response = client.post(
+                "/start",
+                data={
+                    "api_key": "new-key",
+                    "channel": "@channel",
+                    "mode": "incremental",
+                    "site_base_url": "https://site.test/",
+                    "site_seed_token": "secret",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(FakeWorker.instances), 1)
+        self.assertEqual(
+            FakeWorker.instances[0].kwargs["args"][-2:],
+            ("https://site.test", "secret"),
+        )
+        env_text = (self.app_dir / ".env").read_text(encoding="utf-8")
+        self.assertIn("SITE_BASE_URL=https://site.test\n", env_text)
+        self.assertIn("SITE_SEED_TOKEN=secret\n", env_text)
+
+    def test_index_job_syncs_site_after_local_index_success(self):
+        db_path = self.app_dir / "songs.sqlite3"
+        fake_db = Mock()
+        sync = Mock(return_value={"tables": {"channels": 2}})
+        stats = indexer_app.IndexStats(videos_indexed=1, entries_inserted=2)
+
+        with patch.object(indexer_app, "get_database_path", return_value=db_path), patch.object(
+            indexer_app, "get_app_dir", return_value=self.app_dir
+        ), patch.object(indexer_app, "SongDatabase", return_value=fake_db), patch.object(
+            indexer_app, "YouTubeClient"
+        ), patch.object(indexer_app, "run_index_channel", return_value=stats), patch.object(
+            indexer_app, "sync_database_to_site", sync
+        ):
+            indexer_app.run_index_job(
+                "key",
+                "channel",
+                1,
+                1,
+                False,
+                "incremental",
+                False,
+                30,
+                "https://site.test",
+                "secret",
+            )
+
+        fake_db.init_schema.assert_called_once_with()
+        fake_db.close.assert_called_once_with()
+        sync.assert_called_once()
+        self.assertEqual(
+            sync.call_args.args[:4],
+            (db_path, "https://site.test", "secret", self.app_dir / "build" / "d1-seed"),
+        )
+        self.assertTrue(self._state()["ok"])
+        self.assertFalse(self._state()["running"])
+        self.assertIn("站点同步完成", self._state()["message"])
+
+    def test_index_job_reports_local_success_when_site_sync_fails(self):
+        fake_db = Mock()
+        sync = Mock(side_effect=RuntimeError("站点不可用"))
+
+        with patch.object(indexer_app, "get_database_path", return_value=self.app_dir / "songs.sqlite3"), patch.object(
+            indexer_app, "SongDatabase", return_value=fake_db
+        ), patch.object(indexer_app, "YouTubeClient"), patch.object(
+            indexer_app,
+            "run_index_channel",
+            return_value=indexer_app.IndexStats(videos_indexed=1),
+        ), patch.object(indexer_app, "sync_database_to_site", sync), patch.object(
+            indexer_app.logger, "exception"
+        ):
+            indexer_app.run_index_job(
+                "key",
+                "channel",
+                1,
+                1,
+                False,
+                "incremental",
+                False,
+                30,
+                "https://site.test",
+                "secret",
+            )
+
+        self.assertFalse(self._state()["ok"])
+        self.assertFalse(self._state()["running"])
+        self.assertIn("本地索引已完成", self._state()["message"])
+        self.assertIn("站点同步失败", self._state()["message"])
 
     def test_worker_start_failure_restores_non_running_state(self):
         class FailingWorker:

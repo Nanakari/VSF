@@ -63,7 +63,7 @@ SITE_BASE_URL=https://your-site.chatgpt.site
 SITE_SEED_TOKEN=your_site_seed_token_here
 ```
 
-`SITE_BASE_URL` 和 `SITE_SEED_TOKEN` 由本地设置工具用于删除频道后的站点快照同步。`SITE_SEED_TOKEN` 必须与站点 Worker 的 `SEED_TOKEN` 保持一致；令牌只保存在本地 `.env`，不会写入网页或日志。
+`SITE_BASE_URL` 和 `SITE_SEED_TOKEN` 由本地设置工具和命令行索引命令用于索引成功或删除频道后的站点快照同步。配置后，每次本地索引正常完成都会自动生成并上传完整快照；未配置时仍可只更新本地。`SITE_SEED_TOKEN` 必须与站点 Worker 的 `SEED_TOKEN` 保持一致；令牌只保存在本地 `.env`，不会写入网页或日志。
 
 ## 命令行使用
 
@@ -170,7 +170,7 @@ python scripts/export_d1_seed.py
 python scripts/import_d1_snapshot.py --base-url "https://你的站点地址" --token "$env:SEED_TOKEN"
 ```
 
-脚本会读取 `build/d1-seed/manifest.json` 的数据版本，避免重复导入留下已删除的旧记录。网页端搜索结果分页，歌曲详情时间点也通过服务端分页接口按需加载；YouTube API Key、数据库写入和频道索引仍由本地版负责。站点当前保留为私有访问。
+脚本会读取 `build/d1-seed/manifest.json` 的数据版本，避免重复导入留下已删除的旧记录。网页端搜索结果分页，歌曲详情时间点也通过服务端分页接口按需加载；YouTube API Key、数据库写入和频道索引仍由本地版负责。站点访问权限由 Sites 配置决定。
 
 网页端导入采用带版本号的暂存快照。每次 `start` 都会在同一事务中清理非活动版本的暂存行，并把新版本登记为活动版本；旧版本正在进行的分批写入或提交会因版本校验失败而停止，不能污染新版本。相同版本重复开始会保留已有暂存行；如果该版本已经是 `ready`，重复导入直接返回成功，不会重新清空或替换线上数据。只有行数完整的活动快照才会切换线上表，分批缺失或提交失败时仍保留原来的线上快照。
 
@@ -235,7 +235,7 @@ logs/app.log
 - 双击后打开 `http://127.0.0.1:5001`。
 - 填写自己的 YouTube Data API Key。
 - 输入频道 URL、handle 或 channel ID。
-- 点击“开始索引”，索引结果会写入同目录的 `vtuber_songs.sqlite3`。
+- 点击“开始索引”，索引结果会写入同目录的 `vtuber_songs.sqlite3`；如果已配置站点地址和同步令牌，索引完成后会自动生成完整快照并通过站点的原子切换流程同步。
 - 设置站点地址和同步令牌后，可在页面的“本地频道管理”中删除频道。删除前必须输入完整频道名称确认；本地数据会在一个事务中级联清理，随后生成完整快照并通过站点的原子切换流程同步。同步失败时线上仍保留旧快照，本地页面会显示失败原因。
 - 完成后再打开 `VTuberSongFinder.exe` 搜索。
 

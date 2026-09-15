@@ -1,7 +1,11 @@
 import unittest
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+import tempfile
+from unittest.mock import Mock, patch
 
 from database import SongDatabase
+import main
 from main import index_video, run_index_channel
 from youtube_client import ChannelInfo, CommentInfo, VideoInfo, YouTubeAPIError
 
@@ -63,6 +67,36 @@ def video(video_id, published_at, title=None):
 
 
 class IndexingTests(unittest.TestCase):
+    def test_cli_index_syncs_site_when_configured(self):
+        manifest = {"tables": {"channels": 1}}
+        sync = Mock(return_value=manifest)
+
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "songs.sqlite3"
+            app_dir = Path(directory) / "app"
+            with patch.object(main, "get_site_base_url", return_value="https://site.test"), patch.object(
+                main, "get_site_seed_token", return_value="secret"
+            ), patch.object(main, "sync_database_to_site", sync), patch.object(
+                main, "get_app_dir", return_value=app_dir
+            ), patch.object(main, "get_database_path", return_value=database_path), patch.object(
+                main, "get_youtube_api_key", return_value="key"
+            ), patch.object(main, "YouTubeClient") as client_factory, patch.object(
+                main, "index_video", return_value=main.IndexStats(videos_indexed=1)
+            ), patch.object(main, "print_index_stats"):
+                result = main.main(
+                    ["--db", str(database_path), "index-video", "--video-id", "video"]
+                )
+
+        self.assertEqual(result, 0)
+        sync.assert_called_once_with(
+            database_path,
+            "https://site.test",
+            "secret",
+            app_dir / "build" / "d1-seed",
+            on_message=print,
+        )
+        client_factory.return_value.get_video.assert_called_once_with("video")
+
     def test_incremental_scan_does_not_stop_at_existing_video(self):
         db = SongDatabase(":memory:")
         db.init_schema()

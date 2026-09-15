@@ -191,6 +191,18 @@ def start_index():
         if job_state["running"]:
             return jsonify({"ok": False, "message": "已有索引任务正在运行。"}), 409
 
+        try:
+            site_base_url, site_seed_token = resolve_site_sync_config(
+                request.form.get("site_base_url", ""),
+                request.form.get("site_seed_token", ""),
+                persist=True,
+            )
+        except ValueError as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 400
+        except OSError:
+            logger.exception("Failed to save Site sync configuration before indexing")
+            return jsonify({"ok": False, "message": "无法保存站点同步配置。"}), 500
+
         if api_key:
             try:
                 write_env_api_key(api_key)
@@ -220,6 +232,8 @@ def start_index():
                 mode,
                 reset_backfill,
                 recent_rescan_days,
+                site_base_url,
+                site_seed_token,
             ),
             daemon=True,
         )
@@ -393,6 +407,8 @@ def run_index_job(
     mode: str,
     reset_backfill: bool,
     recent_rescan_days: int = DEFAULT_RECENT_RESCAN_DAYS,
+    site_base_url: str = "",
+    site_seed_token: str = "",
 ) -> None:
     db: SongDatabase | None = None
     stats = IndexStats()
@@ -414,7 +430,52 @@ def run_index_job(
             on_message=add_log,
             on_stats=update_stats,
         )
-        finish_job(True, "索引完成。", stats)
+        # Release the indexing connection before export opens its own read
+        # connection.  This also makes the handoff explicit: the local
+        # database is complete before any cloud-side work begins.
+        if db is not None:
+            db.close()
+            db = None
+
+        if site_base_url or site_seed_token:
+            if not site_base_url or not site_seed_token:
+                finish_job(
+                    False,
+                    "本地索引已完成，但站点同步配置不完整；请同时配置站点地址和同步令牌。",
+                    stats,
+                )
+                return
+
+            add_log("本地索引完成，正在生成并上传站点完整快照，请稍候。")
+            try:
+                manifest = sync_database_to_site(
+                    get_database_path(),
+                    site_base_url,
+                    site_seed_token,
+                    get_app_dir() / "build" / "d1-seed",
+                    on_message=add_log,
+                )
+                tables = manifest.get("tables", {})
+                failure_note = (
+                    f"（{stats.videos_failed} 个视频失败，已留待重试）"
+                    if stats.videos_failed
+                    else ""
+                )
+                finish_job(
+                    True,
+                    f"索引完成{failure_note}，站点同步完成（{tables.get('channels', 0)} 个频道）。",
+                    stats,
+                )
+            except Exception as exc:
+                logger.exception("Site resync after indexing failed")
+                finish_job(
+                    False,
+                    f"本地索引已完成，但站点同步失败：{exc}。"
+                    "可确认站点配置后重新运行索引。",
+                    stats,
+                )
+        else:
+            finish_job(True, "索引完成；未配置站点同步，站点数据未更新。", stats)
     except QuotaExceededError as exc:
         finish_job(False, f"YouTube API quota 已用尽：{exc}", stats)
     except YouTubeAPIError as exc:
@@ -552,6 +613,34 @@ def read_saved_site_base_url() -> str:
 
 def read_saved_site_seed_token() -> str:
     return get_site_seed_token()
+
+
+def resolve_site_sync_config(
+    base_url_input: str = "",
+    seed_token_input: str = "",
+    *,
+    persist: bool = False,
+) -> tuple[str, str]:
+    """Resolve optional site settings and optionally save freshly entered values.
+
+    An entirely empty configuration means local-only indexing is allowed.  A
+    partially configured site is rejected so a successful local index cannot
+    silently pretend that its cloud copy was updated.
+    """
+    base_url_input = base_url_input.strip()
+    seed_token_input = seed_token_input.strip()
+    base_url = base_url_input or read_saved_site_base_url()
+    seed_token = seed_token_input or read_saved_site_seed_token()
+
+    if not base_url and not seed_token:
+        return "", ""
+    if not base_url or not seed_token:
+        raise ValueError("站点地址和同步令牌必须同时配置。")
+
+    base_url = normalize_site_base_url(base_url)
+    if persist and (base_url_input or seed_token_input):
+        save_site_sync_config(base_url, seed_token)
+    return base_url, seed_token
 
 
 def normalize_site_base_url(value: str) -> str:

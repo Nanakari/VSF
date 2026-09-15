@@ -26,7 +26,7 @@
         </label>
         <div class="setup-grid">
           <label>
-            <span>站点地址（用于删除后同步）</span>
+            <span>站点地址（用于索引/删除后同步）</span>
             <input name="site_base_url" type="url" value="{{ site_base_url }}" placeholder="https://你的站点.chatgpt.site">
           </label>
           <label>
@@ -36,7 +36,7 @@
         </div>
         <div class="setup-actions">
           <button id="save-site-config" class="secondary-button" type="button">保存站点同步设置</button>
-          <span class="subtle">删除频道前必须配置，用于安全替换站点完整数据快照。</span>
+          <span class="subtle">配置后，索引成功或删除频道都会自动同步站点完整快照；未配置时仍可只更新本地。</span>
         </div>
         <label>
           <span>频道 URL / Handle / Channel ID</span>

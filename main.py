@@ -3,12 +3,20 @@ from __future__ import annotations
 import argparse
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 
-from config import get_database_path, get_youtube_api_key
+from config import (
+    get_app_dir,
+    get_database_path,
+    get_site_base_url,
+    get_site_seed_token,
+    get_youtube_api_key,
+)
 from database import SongDatabase
 from timeline_parser import select_best_timeline_comment
 from search import search_songs
+from site_sync import sync_database_to_site
 from youtube_client import (
     CommentsDisabledError,
     QuotaExceededError,
@@ -187,10 +195,23 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     configure_output_encoding()
     args = build_parser().parse_args(argv)
-    db = SongDatabase(get_database_path(args.db))
+    database_path = get_database_path(args.db)
+    db: SongDatabase | None = SongDatabase(database_path)
     db.init_schema()
 
+    def finish_index_command(stats: IndexStats) -> int:
+        nonlocal db
+        if db is not None:
+            db.close()
+            db = None
+        print_index_stats(stats)
+        sync_indexed_database(database_path)
+        return 0
+
     try:
+        if db is None:
+            raise RuntimeError("Database connection is unavailable")
+
         if args.command == "search":
             return run_search(db, args.query, args.limit, args.channel, args.artist)
 
@@ -214,8 +235,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "index-video":
             video = client.get_video(args.video_id)
             stats = index_video(db, client, video, args.max_comments)
-            print_index_stats(stats)
-            return 0
+            return finish_index_command(stats)
 
         if args.command == "index-channel":
             stats = run_index_channel(
@@ -226,8 +246,7 @@ def main(argv: list[str] | None = None) -> int:
                 max_comments=args.max_comments,
                 include_all_videos=args.include_all_videos,
             )
-            print_index_stats(stats)
-            return 0
+            return finish_index_command(stats)
 
         if args.command == "update-channel":
             stats = run_index_channel(
@@ -240,8 +259,7 @@ def main(argv: list[str] | None = None) -> int:
                 incremental=True,
                 recent_rescan_days=max(args.rescan_days, 0),
             )
-            print_index_stats(stats)
-            return 0
+            return finish_index_command(stats)
 
         if args.command == "backfill-channel":
             stats = run_index_channel(
@@ -254,8 +272,7 @@ def main(argv: list[str] | None = None) -> int:
                 backfill=True,
                 reset_backfill=args.reset,
             )
-            print_index_stats(stats)
-            return 0
+            return finish_index_command(stats)
 
         raise RuntimeError(f"Unknown command: {args.command}")
     except QuotaExceededError as exc:
@@ -268,7 +285,31 @@ def main(argv: list[str] | None = None) -> int:
         print(str(exc), file=sys.stderr)
         return 2
     finally:
-        db.close()
+        if db is not None:
+            db.close()
+
+
+def sync_indexed_database(database_path: Path) -> None:
+    """Synchronize a successfully updated local database when configured."""
+    base_url = get_site_base_url().strip().rstrip("/")
+    seed_token = get_site_seed_token().strip()
+    if not base_url and not seed_token:
+        return
+    if not base_url or not seed_token:
+        raise RuntimeError(
+            "SITE_BASE_URL and SITE_SEED_TOKEN must both be configured for site sync."
+        )
+
+    print("Syncing the completed local index to the site...")
+    manifest = sync_database_to_site(
+        database_path,
+        base_url,
+        seed_token,
+        get_app_dir() / "build" / "d1-seed",
+        on_message=print,
+    )
+    tables = manifest.get("tables", {})
+    print(f"Site sync complete ({tables.get('channels', 0)} channels).")
 
 
 def run_index_channel(

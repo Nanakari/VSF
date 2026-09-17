@@ -41,6 +41,38 @@ cd vtuber_song_finder
 pip install -r requirements.txt
 ```
 
+从 GitHub 下载后，Windows 用户可以直接按下面的方式在本机运行源码版本。搜索服务和设置/索引服务需要分别在两个终端启动：
+
+```powershell
+git clone https://github.com/Nanakari/VSF.git
+cd VSF
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+Copy-Item .env.example .env
+```
+
+终端一启动搜索页面：
+
+```powershell
+.\.venv\Scripts\python.exe app.py
+```
+
+浏览器访问 `http://127.0.0.1:5000`。需要配置 API Key、索引频道或管理频道时，在终端二启动设置页面：
+
+```powershell
+.\.venv\Scripts\python.exe indexer_app.py
+```
+
+然后访问 `http://127.0.0.1:5001`。仓库不会提交个人 `.env`、SQLite 数据库或编译后的 EXE；如需便携版，可以在当前源码目录执行：
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install "pyinstaller>=6.12.0"
+.\.venv\Scripts\python.exe -m PyInstaller --noconfirm --clean --distpath . --workpath build/portable-search VTuberSongFinder.spec
+.\.venv\Scripts\python.exe -m PyInstaller --noconfirm --clean --distpath . --workpath build/portable-setup VTuberSongFinderSetup.spec
+```
+
+生成的两个 EXE 会出现在项目根目录；首次使用前仍需在同目录准备自己的 `.env` 和 `vtuber_songs.sqlite3`，或通过设置工具建立数据库。站点增量同步属于可选功能，需要用户部署自己的站点并在 `.env` 中配置对应的 `SITE_BASE_URL` 和 `SITE_SEED_TOKEN`。
+
 ## 配置 YouTube Data API Key
 
 1. 打开 [Google Cloud Console](https://console.cloud.google.com/)。

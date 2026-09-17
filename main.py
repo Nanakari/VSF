@@ -309,7 +309,11 @@ def sync_indexed_database(database_path: Path) -> None:
         on_message=print,
     )
     tables = manifest.get("tables", {})
-    print(f"Site sync complete ({tables.get('channels', 0)} channels).")
+    mode = manifest.get("sync_mode", "full")
+    print(
+        f"Site sync complete ({mode}; "
+        f"{tables.get('channels', 0)} channels)."
+    )
 
 
 def run_index_channel(

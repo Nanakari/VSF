@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -14,7 +16,29 @@ from song_identity import make_title_search_text, parse_song_identity
 
 TABLE_ORDER = ("channels", "videos", "song_groups", "songs", "song_entries")
 BATCH_SIZE = 90
+PATCH_BATCH_SIZE = 80
+SNAPSHOT_SCHEMA_VERSION = 1
+MAX_INCREMENTAL_OPERATIONS = 80
+MAX_INCREMENTAL_PAYLOAD_BYTES = 1_200_000
+SNAPSHOT_KEYS = {
+    "channels": "channel_id",
+    "videos": "video_id",
+    "song_groups": "group_key",
+    "songs": "id",
+    "song_entries": "id",
+}
+SNAPSHOT_FILES = ("manifest.json", *(f"{table}.json" for table in TABLE_ORDER))
 LogCallback = Callable[[str], None]
+
+
+class SiteSyncHTTPError(RuntimeError):
+    """An HTTP error returned by a Site sync endpoint."""
+
+    def __init__(self, url: str, status_code: int, message: str) -> None:
+        super().__init__(f"{url} failed with HTTP {status_code}: {message}")
+        self.url = url
+        self.status_code = status_code
+        self.message = message
 
 
 def _row_value(row: object, key: str, default: object = None) -> object:
@@ -190,6 +214,7 @@ def export_d1_seed(
     ).encode("utf-8")
     version = hashlib.sha256(version_payload).hexdigest()[:24]
     manifest: dict[str, object] = {
+        "schema": SNAPSHOT_SCHEMA_VERSION,
         "version": version,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "tables": {name: len(rows) for name, rows in seed_tables.items()},
@@ -200,6 +225,124 @@ def export_d1_seed(
     )
     _emit(on_message, f"快照已生成，版本 {version}")
     return manifest
+
+
+def _baseline_dir(output_dir: Path | str) -> Path:
+    output_dir = Path(output_dir)
+    return output_dir.with_name(f"{output_dir.name}-baseline")
+
+
+def _read_snapshot(
+    directory: Path | str,
+    *,
+    require_complete: bool = False,
+) -> tuple[dict[str, object], dict[str, list[dict[str, object]]]]:
+    directory = Path(directory)
+    marker = directory / ".complete"
+    if require_complete and not marker.is_file():
+        raise ValueError("snapshot baseline is incomplete")
+
+    manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict) or manifest.get("schema") != SNAPSHOT_SCHEMA_VERSION:
+        raise ValueError("snapshot baseline uses an unsupported schema")
+
+    tables: dict[str, list[dict[str, object]]] = {}
+    expected_tables = manifest.get("tables")
+    if not isinstance(expected_tables, dict):
+        raise ValueError("snapshot manifest does not contain table counts")
+    for table in TABLE_ORDER:
+        rows = json.loads((directory / f"{table}.json").read_text(encoding="utf-8"))
+        if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+            raise ValueError(f"snapshot table {table} is invalid")
+        if expected_tables.get(table) != len(rows):
+            raise ValueError(f"snapshot table {table} count does not match its manifest")
+        key_name = SNAPSHOT_KEYS[table]
+        seen: set[str] = set()
+        for row in rows:
+            key = str(row.get(key_name, ""))
+            if not key or key in seen:
+                raise ValueError(f"snapshot table {table} contains duplicate or empty keys")
+            seen.add(key)
+        tables[table] = rows
+    return manifest, tables
+
+
+def snapshot_diff(
+    current_dir: Path | str,
+    baseline_dir: Path | str,
+) -> dict[str, dict[str, list[object]]]:
+    """Return row-level upserts and deletes between two exported snapshots."""
+    _, current_tables = _read_snapshot(current_dir)
+    _, baseline_tables = _read_snapshot(baseline_dir, require_complete=True)
+    diff: dict[str, dict[str, list[object]]] = {}
+    for table in TABLE_ORDER:
+        key_name = SNAPSHOT_KEYS[table]
+        current_by_key = {str(row[key_name]): row for row in current_tables[table]}
+        baseline_by_key = {str(row[key_name]): row for row in baseline_tables[table]}
+        upserts = [
+            current_by_key[key]
+            for key in current_by_key.keys() - baseline_by_key.keys()
+        ]
+        upserts.extend(
+            current_by_key[key]
+            for key in current_by_key.keys() & baseline_by_key.keys()
+            if current_by_key[key] != baseline_by_key[key]
+        )
+        deletes = [
+            baseline_by_key[key][key_name]
+            for key in baseline_by_key.keys() - current_by_key.keys()
+        ]
+        upserts.sort(key=lambda row: str(row[key_name]))  # type: ignore[index]
+        deletes.sort(key=str)
+        diff[table] = {"upserts": upserts, "deletes": deletes}
+    return diff
+
+
+def incremental_change_stats(
+    diff: dict[str, dict[str, list[object]]],
+) -> tuple[int, int]:
+    """Return operation count and approximate JSON payload bytes."""
+    operations = 0
+    payload_bytes = 0
+    for table in TABLE_ORDER:
+        changes = diff[table]
+        upserts = changes["upserts"]
+        deletes = changes["deletes"]
+        operations += len(upserts) + len(deletes)
+        payload_bytes += len(
+            json.dumps(
+                {"table": table, "upserts": upserts, "deletes": deletes},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+    return operations, payload_bytes
+
+
+def should_use_incremental(operation_count: int, payload_bytes: int) -> bool:
+    return (
+        0 < operation_count <= MAX_INCREMENTAL_OPERATIONS
+        and 0 < payload_bytes <= MAX_INCREMENTAL_PAYLOAD_BYTES
+    )
+
+
+def _write_baseline(current_dir: Path | str, baseline_dir: Path | str) -> None:
+    """Persist a complete baseline only after the remote sync succeeds."""
+    current_dir = Path(current_dir)
+    baseline_dir = Path(baseline_dir)
+    baseline_dir.mkdir(parents=True, exist_ok=True)
+    marker = baseline_dir / ".complete"
+    marker.unlink(missing_ok=True)
+    for name in SNAPSHOT_FILES:
+        source = current_dir / name
+        if not source.is_file():
+            raise ValueError(f"current snapshot is missing {name}")
+        temporary = baseline_dir / f".{name}.tmp"
+        shutil.copyfile(source, temporary)
+        os.replace(temporary, baseline_dir / name)
+    marker_temp = baseline_dir / ".complete.tmp"
+    marker_temp.write_text("ok\n", encoding="utf-8")
+    os.replace(marker_temp, marker)
 
 
 def request_json(
@@ -219,13 +362,94 @@ def request_json(
     except ValueError:
         body = {}
     if not response.ok:
-        raise RuntimeError(
-            f"{url} failed with HTTP {response.status_code}: "
-            f"{body.get('message', 'unknown error')}"
+        raise SiteSyncHTTPError(
+            url,
+            response.status_code,
+            str(body.get("message", "unknown error")),
         )
     if body.get("ok") is False:
         raise RuntimeError(f"{url} failed: {body.get('message', 'unknown error')}")
     return body
+
+
+def _patch_batches(
+    upserts: list[object],
+    deletes: list[object],
+) -> list[tuple[list[object], list[object]]]:
+    batches: list[tuple[list[object], list[object]]] = []
+    upsert_index = 0
+    delete_index = 0
+    while upsert_index < len(upserts) or delete_index < len(deletes):
+        remaining = PATCH_BATCH_SIZE
+        upsert_batch = upserts[upsert_index : upsert_index + remaining]
+        upsert_index += len(upsert_batch)
+        remaining -= len(upsert_batch)
+        delete_batch = deletes[delete_index : delete_index + remaining]
+        delete_index += len(delete_batch)
+        batches.append((upsert_batch, delete_batch))
+    return batches
+
+
+def import_incremental(
+    base_url: str,
+    token: str,
+    base_version: str,
+    version: str,
+    tables: dict[str, int],
+    diff: dict[str, dict[str, list[object]]],
+    on_message: LogCallback | None = None,
+    request_json_fn: Callable[
+        [requests.Session, str, str, dict[str, object]], dict[str, object]
+    ] = request_json,
+) -> None:
+    """Apply a small row-level change set with an atomic Worker commit."""
+    base_url = base_url.rstrip("/")
+    session = requests.Session()
+    changes = {
+        table: {
+            "upserts": len(diff[table]["upserts"]),
+            "deletes": len(diff[table]["deletes"]),
+        }
+        for table in TABLE_ORDER
+    }
+    start_result = request_json_fn(
+        session,
+        f"{base_url}/api/admin/patch/start",
+        token,
+        {
+            "version": version,
+            "base_version": base_version,
+            "tables": tables,
+            "changes": changes,
+        },
+    )
+    if start_result.get("status") == "ready":
+        _emit(on_message, f"站点增量版本 {version} 已经同步")
+        return
+
+    for table in TABLE_ORDER:
+        for upserts, deletes in _patch_batches(
+            diff[table]["upserts"], diff[table]["deletes"]
+        ):
+            request_json_fn(
+                session,
+                f"{base_url}/api/admin/patch",
+                token,
+                {
+                    "version": version,
+                    "table": table,
+                    "upserts": upserts,
+                    "deletes": deletes,
+                },
+            )
+
+    request_json_fn(
+        session,
+        f"{base_url}/api/admin/patch/commit",
+        token,
+        {"version": version},
+    )
+    _emit(on_message, f"站点增量版本 {version} 已完成切换")
 
 
 def import_snapshot(
@@ -287,6 +511,67 @@ def sync_database_to_site(
     output_dir: Path | str,
     on_message: LogCallback | None = None,
 ) -> dict[str, object]:
+    output_dir = Path(output_dir)
     manifest = export_d1_seed(database_path, output_dir, on_message=on_message)
-    import_snapshot(base_url, token, output_dir, on_message=on_message)
-    return manifest
+    baseline_dir = _baseline_dir(output_dir)
+    previous_manifest: dict[str, object] | None = None
+    try:
+        previous_manifest, _ = _read_snapshot(baseline_dir)
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        _emit(on_message, "未找到可用的站点同步基线，将执行完整同步。")
+
+    current_version = str(manifest["version"])
+    if previous_manifest and previous_manifest.get("version") == current_version:
+        _emit(on_message, "本地数据没有变化，跳过站点上传。")
+        return {
+            **manifest,
+            "sync_mode": "skipped",
+            "changed_rows": 0,
+        }
+
+    mode = "full"
+    changed_rows = 0
+    if previous_manifest:
+        try:
+            diff = snapshot_diff(output_dir, baseline_dir)
+            changed_rows, payload_bytes = incremental_change_stats(diff)
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            diff = None
+            payload_bytes = 0
+
+        if diff is not None and (changed_rows == 0 or should_use_incremental(changed_rows, payload_bytes)):
+            if changed_rows == 0:
+                _emit(on_message, "本地数据指纹发生变化但没有可上传的行变更，将执行完整同步。")
+            else:
+                _emit(on_message, f"检测到 {changed_rows} 行变更，执行增量同步。")
+                try:
+                    import_incremental(
+                        base_url,
+                        token,
+                        str(previous_manifest["version"]),
+                        current_version,
+                        {
+                            table: int(manifest["tables"][table])  # type: ignore[index]
+                            for table in TABLE_ORDER
+                        },
+                        diff,
+                        on_message=on_message,
+                    )
+                    mode = "incremental"
+                except SiteSyncHTTPError as exc:
+                    if exc.status_code not in (404, 405, 409):
+                        raise
+                    _emit(on_message, "增量同步基线不匹配或站点尚未支持增量接口，改为完整同步。")
+        else:
+            _emit(on_message, "变更量较大或快照结构不兼容，执行完整同步。")
+
+    if mode == "full":
+        import_snapshot(base_url, token, output_dir, on_message=on_message)
+
+    _write_baseline(output_dir, baseline_dir)
+    _emit(on_message, f"站点同步完成（{mode}）。")
+    return {
+        **manifest,
+        "sync_mode": mode,
+        "changed_rows": changed_rows,
+    }

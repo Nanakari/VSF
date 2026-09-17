@@ -121,7 +121,11 @@ class SetupValidationTests(unittest.TestCase):
 
         with patch.object(indexer_app, "get_app_dir", return_value=self.app_dir), patch.object(
             indexer_app.threading, "Thread", FakeWorker
-        ), patch.dict(os.environ, {}, clear=False):
+        ), patch.dict(
+            os.environ,
+            {"SITE_BASE_URL": "", "SITE_SEED_TOKEN": ""},
+            clear=False,
+        ):
             response = client.post(
                 "/start",
                 data={

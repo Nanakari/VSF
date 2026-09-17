@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+from urllib.parse import urlencode
 import webbrowser
 
 from flask import Flask, Response, abort, jsonify, redirect, render_template, request, url_for
@@ -154,7 +155,9 @@ def open_setup():
             f"并查看日志：{LOG_PATH}",
             503,
         )
-    return redirect("http://127.0.0.1:5001/")
+    return_to = safe_local_path(request.args.get("return_to"))
+    target_url = f"http://127.0.0.1:5001/?{urlencode({'return_to': return_to})}"
+    return redirect(target_url)
 
 
 
@@ -207,7 +210,7 @@ def index():
         has_search=has_search_query,
         index_url=url_for("index"),
         auto_exit_enabled=AUTO_EXIT_ENABLED,
-        setup_url=url_for("open_setup"),
+        setup_url=url_for("open_setup", return_to=request.full_path.rstrip("?")),
     )
 
 
@@ -235,6 +238,20 @@ def parse_page(value: str | None) -> int:
     except ValueError:
         return 1
     return max(parsed, 1)
+
+
+def safe_local_path(value: str | None) -> str:
+    target = str(value or "/")
+    if (
+        not target.startswith("/")
+        or target.startswith("//")
+        or "\\" in target
+        or "#" in target
+        or "\r" in target
+        or "\n" in target
+    ):
+        return "/"
+    return target
 
 
 def ensure_peer_app(exe_name: str, port: int, source_script: str | None = None) -> bool:
@@ -393,4 +410,3 @@ if __name__ == "__main__":
     except Exception:
         logger.exception("Failed to start VTuber Song Finder")
         raise
-

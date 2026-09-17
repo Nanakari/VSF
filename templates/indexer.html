@@ -161,6 +161,7 @@
         let deleteChannelTitle = "";
         let formError = "";
         let reloadAfterDelete = false;
+        let reloadAfterIndex = false;
         const statMap = {
           videos_seen: document.querySelector("#videos-seen"),
           videos_indexed: document.querySelector("#videos-indexed"),
@@ -189,6 +190,7 @@
               return;
             }
             message.textContent = data.message || "索引任务已开始。";
+            reloadAfterIndex = true;
           } catch (_) {
             formError = "无法连接更新服务，请重新打开更新页面。";
             button.disabled = false;
@@ -286,6 +288,9 @@
         const refreshStatus = async () => {
           const response = await fetch("{{ url_for('status') }}");
           const data = await response.json();
+          if (data.operation === "index" && data.running) {
+            reloadAfterIndex = true;
+          }
           if (!formError) {
             message.textContent = data.message || "";
           }
@@ -303,6 +308,10 @@
           if (reloadAfterDelete && data.operation === "delete-channel" && data.done && !data.running) {
             reloadAfterDelete = false;
             if (data.ok) window.setTimeout(() => window.location.reload(), 1200);
+          }
+          if (reloadAfterIndex && data.operation === "index" && data.done && !data.running) {
+            reloadAfterIndex = false;
+            window.setTimeout(() => window.location.reload(), 1200);
           }
         };
 

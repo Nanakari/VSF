@@ -144,7 +144,10 @@ def index():
         site_base_url=read_saved_site_base_url(),
         has_saved_site_seed_token=bool(read_saved_site_seed_token()),
         auto_exit_enabled=AUTO_EXIT_ENABLED,
-        search_url=url_for("open_search"),
+        search_url=url_for(
+            "open_search",
+            return_to=safe_local_path(request.args.get("return_to")),
+        ),
         has_saved_api_key=bool(read_saved_api_key()),
     )
 
@@ -159,7 +162,7 @@ def open_search():
             f"并查看日志：{LOG_PATH}",
             503,
         )
-    return redirect("http://127.0.0.1:5000/")
+    return redirect(f"http://127.0.0.1:5000{safe_local_path(request.args.get('return_to'))}")
 
 @app.post("/start")
 def start_index():
@@ -446,7 +449,7 @@ def run_index_job(
                 )
                 return
 
-            add_log("本地索引完成，正在生成并上传站点完整快照，请稍候。")
+            add_log("本地索引完成，正在计算站点变更并同步，请稍候。")
             try:
                 manifest = sync_database_to_site(
                     get_database_path(),
@@ -456,6 +459,7 @@ def run_index_job(
                     on_message=add_log,
                 )
                 tables = manifest.get("tables", {})
+                sync_mode = manifest.get("sync_mode", "full")
                 failure_note = (
                     f"（{stats.videos_failed} 个视频失败，已留待重试）"
                     if stats.videos_failed
@@ -463,7 +467,7 @@ def run_index_job(
                 )
                 finish_job(
                     True,
-                    f"索引完成{failure_note}，站点同步完成（{tables.get('channels', 0)} 个频道）。",
+                    f"索引完成{failure_note}，站点同步完成（{sync_mode}，{tables.get('channels', 0)} 个频道）。",
                     stats,
                 )
             except Exception as exc:
@@ -517,7 +521,7 @@ def run_delete_channel_job(
             db.close()
 
     try:
-        add_log("正在生成并上传站点完整快照，请稍候。")
+        add_log("正在计算站点变更并同步，请稍候。")
         manifest = sync_database_to_site(
             get_database_path(),
             site_base_url,
@@ -526,9 +530,10 @@ def run_delete_channel_job(
             on_message=add_log,
         )
         tables = manifest.get("tables", {})
+        sync_mode = manifest.get("sync_mode", "full")
         finish_job(
             True,
-            f"频道 {channel_title} 已删除，站点同步完成（{tables.get('channels', 0)} 个频道）。",
+            f"频道 {channel_title} 已删除，站点同步完成（{sync_mode}，{tables.get('channels', 0)} 个频道）。",
             IndexStats(),
         )
     except Exception as exc:
@@ -734,6 +739,20 @@ def parse_nonnegative_int(value: str | None, default: int) -> int:
     except ValueError:
         return default
     return max(parsed, 0)
+
+
+def safe_local_path(value: str | None) -> str:
+    target = str(value or "/")
+    if (
+        not target.startswith("/")
+        or target.startswith("//")
+        or "\\" in target
+        or "#" in target
+        or "\r" in target
+        or "\n" in target
+    ):
+        return "/"
+    return target
 
 
 

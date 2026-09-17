@@ -39,6 +39,24 @@ class SetupValidationTests(unittest.TestCase):
         with indexer_app.job_lock:
             return dict(indexer_app.job_state)
 
+    def test_channel_management_renders_incremental_update_action(self):
+        database_path = self.app_dir / "songs.sqlite3"
+        db = SongDatabase(database_path)
+        db.init_schema()
+        db.upsert_channel("channel", "Test Channel")
+        db.close()
+
+        client = indexer_app.app.test_client()
+        with patch.object(indexer_app, "get_database_path", return_value=database_path), patch.object(
+            indexer_app, "get_app_dir", return_value=self.app_dir
+        ), patch.object(indexer_app, "read_saved_api_key", return_value=""):
+            response = client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"update-channel-button", response.data)
+        self.assertIn(b'data-channel-id="channel"', response.data)
+        self.assertIn("增量更新".encode("utf-8"), response.data)
+
     def test_invalid_channel_or_mode_returns_400_without_saving_key(self):
         client = self._authorized_client()
         save_key = Mock()

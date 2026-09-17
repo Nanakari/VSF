@@ -39,12 +39,12 @@
           <span class="subtle">配置后，索引成功或删除频道都会自动同步站点数据（优先增量，必要时完整快照）；未配置时仍可只更新本地。</span>
         </div>
         <label>
-          <span>频道 URL / Handle / Channel ID</span>
+          <span>频道 URL / Handle / Channel ID（新频道或已有频道均可）</span>
           <input name="channel" placeholder="https://www.youtube.com/@Shairu.ch_0801">
         </label>
         <div class="setup-grid">
           <label>
-            <span>扫描上传数</span>
+            <span>本次最多检查视频</span>
             <input name="max_videos" type="number" min="1" value="{{ default_max_videos }}">
           </label>
           <label>
@@ -61,7 +61,7 @@
           <select name="mode">
             <option value="incremental" selected>增量更新：按数据库最新日期抓取新上传</option>
             <option value="backfill">历史回填：从上次中断位置继续</option>
-            <option value="full">扫描最新上传：只跳过已完成条目</option>
+            <option value="full">重新检查最近上传：只跳过已完成条目</option>
           </select>
         </label>
         <div class="check-row">
@@ -74,7 +74,7 @@
             <span>重置历史回填进度</span>
           </label>
         </div>
-        <p class="subtle">增量更新会从数据库最新发布时间之后继续抓取；同时会复查失败和近期暂时没有粉丝歌单的视频。填 0 可关闭近期回扫。</p>
+        <p class="subtle">默认增量更新会从数据库最新发布时间之后继续抓取；频道管理中的“增量更新”按钮也使用此模式。失败和近期暂时没有粉丝歌单的视频仍会按规则复查；填 0 可关闭近期回扫。</p>
         <button id="start-button" type="submit">开始索引</button>
       </form>
 
@@ -82,7 +82,7 @@
         <div class="section-heading">
           <div>
             <h2 id="channel-management-title">本地频道管理</h2>
-            <p class="subtle">删除会同时清理该频道的视频、歌曲、时间点和回填进度，并自动同步站点。</p>
+            <p class="subtle">可直接对已有频道执行增量更新；删除会同时清理本地数据并同步站点。</p>
           </div>
         </div>
         {% if channels %}
@@ -93,15 +93,23 @@
                   <strong>{{ channel.channel_title }}</strong>
                   <span>{{ channel.video_count }} 个视频 · {{ channel.song_count }} 首歌曲 · {{ channel.entry_count }} 个时间点</span>
                 </div>
-                <button
-                  class="danger-button delete-channel-button"
-                  type="button"
-                  data-channel-id="{{ channel.channel_id }}"
-                  data-channel-title="{{ channel.channel_title }}"
-                  data-channel-video-count="{{ channel.video_count }}"
-                  data-channel-song-count="{{ channel.song_count }}"
-                  data-channel-entry-count="{{ channel.entry_count }}"
-                >删除频道</button>
+                <div class="channel-card-actions">
+                  <button
+                    class="secondary-button update-channel-button"
+                    type="button"
+                    data-channel-id="{{ channel.channel_id }}"
+                    data-channel-title="{{ channel.channel_title }}"
+                  >增量更新</button>
+                  <button
+                    class="danger-button delete-channel-button"
+                    type="button"
+                    data-channel-id="{{ channel.channel_id }}"
+                    data-channel-title="{{ channel.channel_title }}"
+                    data-channel-video-count="{{ channel.video_count }}"
+                    data-channel-song-count="{{ channel.song_count }}"
+                    data-channel-entry-count="{{ channel.entry_count }}"
+                  >删除频道</button>
+                </div>
               </article>
             {% endfor %}
           </div>
@@ -150,6 +158,8 @@
         const button = document.querySelector("#start-button");
         const saveSiteConfigButton = document.querySelector("#save-site-config");
         const exitButton = document.querySelector("#exit-button");
+        const updateChannelButtons = document.querySelectorAll(".update-channel-button");
+        const deleteChannelButtons = document.querySelectorAll(".delete-channel-button");
         const message = document.querySelector("#status-message");
         const log = document.querySelector("#job-log");
         const deleteDialog = document.querySelector("#delete-dialog");
@@ -172,20 +182,30 @@
           entries_inserted: document.querySelector("#entries-inserted")
         };
 
-        form.addEventListener("submit", async (event) => {
-          event.preventDefault();
+        const setIndexControlsDisabled = (disabled) => {
+          button.disabled = disabled;
+          saveSiteConfigButton.disabled = disabled;
+          deleteChannelButtons.forEach((deleteButton) => {
+            deleteButton.disabled = disabled;
+          });
+          updateChannelButtons.forEach((updateButton) => {
+            updateButton.disabled = disabled;
+          });
+        };
+
+        const startIndexTask = async (payload, pendingMessage) => {
           formError = "";
-          button.disabled = true;
-          message.textContent = "正在启动索引任务...";
+          setIndexControlsDisabled(true);
+          message.textContent = pendingMessage;
           try {
             const response = await fetch(form.action, {
               method: "POST",
-              body: new FormData(form)
+              body: payload
             });
             const data = await response.json().catch(() => ({}));
             if (!response.ok) {
               formError = data.message || "启动失败。";
-              button.disabled = false;
+              setIndexControlsDisabled(false);
               message.textContent = formError;
               return;
             }
@@ -193,9 +213,29 @@
             reloadAfterIndex = true;
           } catch (_) {
             formError = "无法连接更新服务，请重新打开更新页面。";
-            button.disabled = false;
+            setIndexControlsDisabled(false);
             message.textContent = formError;
           }
+        };
+
+        form.addEventListener("submit", (event) => {
+          event.preventDefault();
+          void startIndexTask(new FormData(form), "正在启动索引任务...");
+        });
+
+        updateChannelButtons.forEach((updateButton) => {
+          updateButton.addEventListener("click", () => {
+            const channelId = updateButton.dataset.channelId || "";
+            const channelTitle = updateButton.dataset.channelTitle || channelId;
+            const payload = new FormData(form);
+            payload.set("channel", channelId);
+            payload.set("mode", "incremental");
+            payload.delete("reset_backfill");
+            void startIndexTask(
+              payload,
+              `正在对“${channelTitle}”执行增量更新...`
+            );
+          });
         });
 
         saveSiteConfigButton.addEventListener("click", async () => {
@@ -215,7 +255,7 @@
           }
         });
 
-        document.querySelectorAll(".delete-channel-button").forEach((deleteButton) => {
+        deleteChannelButtons.forEach((deleteButton) => {
           deleteButton.addEventListener("click", () => {
             deleteChannelTitle = deleteButton.dataset.channelTitle || "";
             deleteChannelId.value = deleteButton.dataset.channelId || "";
@@ -302,8 +342,11 @@
           log.scrollTop = log.scrollHeight;
           button.disabled = Boolean(data.running);
           saveSiteConfigButton.disabled = Boolean(data.running);
-          document.querySelectorAll(".delete-channel-button").forEach((deleteButton) => {
+          deleteChannelButtons.forEach((deleteButton) => {
             deleteButton.disabled = Boolean(data.running);
+          });
+          updateChannelButtons.forEach((updateButton) => {
+            updateButton.disabled = Boolean(data.running);
           });
           if (reloadAfterDelete && data.operation === "delete-channel" && data.done && !data.running) {
             reloadAfterDelete = false;

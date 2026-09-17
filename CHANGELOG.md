@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-17
+
 - Keep portable build inputs under `packaging/` and generated executables under `build/portable/`.
 - Add repository governance files and CI checks for generated output and local-data hygiene.
 

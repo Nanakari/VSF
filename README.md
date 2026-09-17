@@ -67,11 +67,12 @@ Copy-Item .env.example .env
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install "pyinstaller>=6.12.0"
-.\.venv\Scripts\python.exe -m PyInstaller --noconfirm --clean --distpath . --workpath build/portable-search VTuberSongFinder.spec
-.\.venv\Scripts\python.exe -m PyInstaller --noconfirm --clean --distpath . --workpath build/portable-setup VTuberSongFinderSetup.spec
+.\.venv\Scripts\python.exe -m PyInstaller --noconfirm --clean --distpath build/portable --workpath build/portable-build-search packaging/VTuberSongFinder.spec
+.\.venv\Scripts\python.exe -m PyInstaller --noconfirm --clean --distpath build/portable --workpath build/portable-build-setup packaging/VTuberSongFinderSetup.spec
+Copy-Item packaging/PORTABLE_README.txt, packaging/start.bat, packaging/stop.bat, packaging/stop.ps1, .env.example -Destination build/portable
 ```
 
-生成的两个 EXE 会出现在项目根目录；首次使用前仍需在同目录准备自己的 `.env` 和 `vtuber_songs.sqlite3`，或通过设置工具建立数据库。站点增量同步属于可选功能，需要用户部署自己的站点并在 `.env` 中配置对应的 `SITE_BASE_URL` 和 `SITE_SEED_TOKEN`。
+生成的两个 EXE 会出现在 `build/portable/`；启动脚本和便携版说明也集中在 `packaging/`。首次使用前仍需在 EXE 同目录准备自己的 `.env` 和 `vtuber_songs.sqlite3`，或通过设置工具建立数据库。站点增量同步属于可选功能，需要用户部署自己的站点并在 `.env` 中配置对应的 `SITE_BASE_URL` 和 `SITE_SEED_TOKEN`。
 
 ## 配置 YouTube Data API Key
 
@@ -250,7 +251,7 @@ channel 查询实际命中生成的 `Channel 000`；每个查询重复 3 次，�
 
 ## Portable exe
 
-打包后的 `VTuberSongFinder.exe` 是图形模式，不会弹出命令行窗口。日志默认写入：
+打包后的 `build/portable/VTuberSongFinder.exe` 是图形模式，不会弹出命令行窗口。便携版相关的 EXE、启动脚本和说明集中在 `build/portable/` 与 `packaging/`，不会散落在项目根目录。日志默认写入：
 
 ```text
 logs/app.log
@@ -304,6 +305,13 @@ vtuber_song_finder/
 ├── db/
 │   └── schema.ts
 ├── drizzle/
+├── packaging/
+│   ├── VTuberSongFinder.spec
+│   ├── VTuberSongFinderSetup.spec
+│   ├── PORTABLE_README.txt
+│   ├── start.bat
+│   ├── stop.bat
+│   └── stop.ps1
 ├── site/
 ├── worker/
 ├── scripts/

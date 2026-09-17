@@ -1,11 +1,20 @@
-﻿# -*- mode: python ; coding: utf-8 -*-
+# -*- mode: python ; coding: utf-8 -*-
+
+
+from pathlib import Path
+
+
+PROJECT_DIR = Path.cwd()
 
 
 a = Analysis(
-    ['app.py'],
-    pathex=[],
+    [str(PROJECT_DIR / 'indexer_app.py')],
+    pathex=[str(PROJECT_DIR)],
     binaries=[],
-    datas=[('templates', 'templates'), ('static', 'static')],
+    datas=[
+        (str(PROJECT_DIR / 'templates'), 'templates'),
+        (str(PROJECT_DIR / 'static'), 'static'),
+    ],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -47,7 +56,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='VTuberSongFinder',
+    name='VTuberSongFinderSetup',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -61,6 +70,3 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
 )
-
-
-

@@ -22,6 +22,17 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      - name: Check repository hygiene
+        shell: bash
+        run: |
+          test ! -e .env
+          test ! -e vtuber_songs.sqlite3
+          test ! -e VTuberSongFinder.exe
+          test ! -e VTuberSongFinderSetup.exe
+          test ! -e start.bat
+          test ! -e stop.bat
+          test ! -e stop.ps1
+          git diff --check
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
@@ -56,6 +67,10 @@ jobs:
           cache: npm
       - name: Install site dependencies
         run: npm ci
+      - name: Check generated migrations
+        run: |
+          npm run db:generate
+          git diff --exit-code -- drizzle
       - name: Build and validate Worker site
         run: |
           npm run build

@@ -341,7 +341,7 @@ npm test
 ```
 
 贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md)，敏感信息和漏洞报告方式见
-[SECURITY.md](SECURITY.md)。
+[SECURITY.md](SECURITY.md)，版本记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 许可证
 

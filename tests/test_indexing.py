@@ -103,13 +103,20 @@ class IndexingTests(unittest.TestCase):
         db.upsert_channel("channel", "Test Channel")
         db.upsert_video("existing", "channel", "existing", "2026-01-03")
         db.mark_video_index_status("existing", "indexed")
-        client = FakeClient([video("existing", "2026-01-03"), video("new", "2026-01-02")])
+        client = FakeClient(
+            [
+                video("new", "2026-01-04"),
+                video("existing", "2026-01-03"),
+                video("old-gap", "2026-01-02"),
+            ]
+        )
 
         stats = run_index_channel(db, client, "channel", 10, 20, True, incremental=True)
 
         self.assertEqual(stats.videos_failed, 0)
         self.assertEqual(db.get_video_index_state("new")["index_status"], "indexed")
         self.assertEqual(db.get_video_index_state("existing")["index_status"], "indexed")
+        self.assertIsNone(db.get_video_index_state("old-gap"))
         db.close()
 
     def test_include_all_rechecks_previously_filtered_video(self):
@@ -131,6 +138,23 @@ class IndexingTests(unittest.TestCase):
         self.assertEqual(third.videos_skipped, 1)
         self.assertEqual(db.get_video_index_state("filtered")["index_status"], "filtered")
         self.assertEqual(client.comment_attempts, 1)
+        db.close()
+
+    def test_existing_channel_is_requeried_when_no_new_upload_exists(self):
+        db = SongDatabase(":memory:")
+        db.init_schema()
+        db.upsert_channel("channel", "Test Channel")
+        db.upsert_video("existing", "channel", "existing", "2026-01-03")
+        db.mark_video_index_status("existing", "indexed")
+        client = FakeClient(
+            [video("existing", "2026-01-03"), video("old", "2026-01-02")]
+        )
+
+        stats = run_index_channel(db, client, "channel", 10, 20, True, incremental=True)
+
+        self.assertEqual(stats.videos_seen, 1)
+        self.assertEqual(stats.videos_skipped, 1)
+        self.assertIsNone(db.get_video_index_state("old"))
         db.close()
 
     def test_failed_comments_are_retried_on_the_next_run(self):

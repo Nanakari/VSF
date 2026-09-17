@@ -492,6 +492,19 @@ class SongDatabase:
             (channel_id,),
         ).fetchone()
 
+    def get_latest_published_at_for_channel(self, channel_id: str) -> str | None:
+        row = self.conn.execute(
+            """
+            SELECT MAX(published_at) AS latest_published_at
+            FROM videos
+            WHERE channel_id = ? AND published_at IS NOT NULL
+            """,
+            (channel_id,),
+        ).fetchone()
+        if row is None or row["latest_published_at"] is None:
+            return None
+        return str(row["latest_published_at"])
+
     def insert_song_entries(
         self,
         video_id: str,

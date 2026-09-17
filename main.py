@@ -98,7 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     update_channel = subparsers.add_parser(
         "update-channel",
-        help="Scan recent uploads without stopping at existing videos; retry incomplete work.",
+        help="Update uploads after the channel's latest local publication; retry incomplete work.",
     )
     update_channel.add_argument(
         "--channel",
@@ -333,6 +333,7 @@ def run_index_channel(
     log = on_message or print
 
     channel_info = client.get_channel(channel)
+    existing_channel = db.get_channel(channel_info.channel_id)
     db.upsert_channel(channel_info.channel_id, channel_info.title)
 
     if reset_backfill:
@@ -342,8 +343,17 @@ def run_index_channel(
     recent_recheck_days = DEFAULT_RECENT_RECHECK_DAYS if incremental else None
     backfill_state = db.get_backfill_state(channel_info.channel_id) if backfill else None
     backfill_complete = bool(backfill_state is not None and backfill_state["backfill_complete"])
+    latest_published_at = (
+        db.get_latest_published_at_for_channel(channel_info.channel_id)
+        if incremental
+        else None
+    )
 
     log(f"Channel: {channel_info.title} ({channel_info.channel_id})")
+    if existing_channel is not None:
+        log("频道已存在，仍会重新查询其上传列表并继续更新。")
+    else:
+        log("发现新频道，开始建立索引。")
     if backfill:
         if backfill_complete:
             log("Historical backfill is complete; checking any pending retries.")
@@ -356,7 +366,14 @@ def run_index_channel(
         else:
             log("Starting historical backfill from the newest upload.")
     elif incremental:
-        log("Incremental update scans recent uploads without stopping at existing videos.")
+        if latest_published_at:
+            log(
+                "增量更新以数据库最新发布时间 "
+                f"{latest_published_at} 为边界，只处理之后的新上传，"
+                "并检查边界视频避免遗漏。"
+            )
+        else:
+            log("数据库中还没有该频道的视频，将从最新上传开始建立索引。")
         log(
             "Completed videos are skipped; failed videos use bounded exponential retry "
             f"backoff, and no-timeline videos from the last {recent_rescan_days} days "
@@ -414,6 +431,13 @@ def run_index_channel(
         channel_info.uploads_playlist_id,
         max_videos=playlist_limit,
     ):
+        if incremental and latest_published_at and upload.published_at:
+            if upload.published_at < latest_published_at:
+                log(
+                    "已到达数据库最新发布时间之前的上传，停止本次增量检索。"
+                )
+                break
+
         if backfill and not past_cursor:
             cursor_published_at = cursor["backfill_before_published_at"]
             if upload.video_id == cursor["backfill_before_video_id"]:

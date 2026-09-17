@@ -638,6 +638,11 @@ class SongDatabase:
                 title_search = excluded.title_search,
                 artist_search = excluded.artist_search,
                 updated_at = CURRENT_TIMESTAMP
+            WHERE songs.artist IS NOT excluded.artist
+               OR songs.song_key IS NOT excluded.song_key
+               OR songs.artist_key IS NOT excluded.artist_key
+               OR songs.title_search IS NOT excluded.title_search
+               OR songs.artist_search IS NOT excluded.artist_search
             """,
             (
                 channel_id,
@@ -1504,10 +1509,29 @@ class SongDatabase:
                 """
                 UPDATE songs
                 SET artist = ?, song_key = ?, artist_key = ?,
-                    title_search = ?, artist_search = ?, updated_at = CURRENT_TIMESTAMP
+                    title_search = ?, artist_search = ?
                 WHERE id = ?
+                  AND (
+                        artist IS NOT ?
+                     OR song_key IS NOT ?
+                     OR artist_key IS NOT ?
+                     OR title_search IS NOT ?
+                     OR artist_search IS NOT ?
+                  )
                 """,
-                (artist, song_key, artist_key, title_search, compact_key(artist), row["id"]),
+                (
+                    artist,
+                    song_key,
+                    artist_key,
+                    title_search,
+                    compact_key(artist),
+                    row["id"],
+                    artist,
+                    song_key,
+                    artist_key,
+                    title_search,
+                    compact_key(artist),
+                ),
             )
 
     def _needs_song_backfill(self) -> bool:

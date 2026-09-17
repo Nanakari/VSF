@@ -21,6 +21,29 @@ def entry(raw_title: str, seconds: int) -> TimelineEntry:
 
 
 class SearchAndLifecycleTests(unittest.TestCase):
+    def test_repeated_song_upsert_preserves_updated_at_when_metadata_is_unchanged(self):
+        db = SongDatabase(":memory:")
+        db.init_schema()
+        db.upsert_channel("channel", "Test Channel")
+
+        song_id = db.upsert_song("channel", "Song / Artist", "song / artist")
+        db.conn.execute(
+            "UPDATE songs SET updated_at = ? WHERE id = ?",
+            ("2000-01-01 00:00:00", song_id),
+        )
+        db.conn.commit()
+
+        self.assertEqual(
+            db.upsert_song("channel", "Song / Artist", "song / artist"),
+            song_id,
+        )
+        row = db.conn.execute(
+            "SELECT updated_at FROM songs WHERE id = ?",
+            (song_id,),
+        ).fetchone()
+        self.assertEqual(row["updated_at"], "2000-01-01 00:00:00")
+        db.close()
+
     def test_channel_only_search_matches_all_channels_and_merges_song_identity(self):
         db = SongDatabase(":memory:")
         db.init_schema()

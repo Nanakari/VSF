@@ -109,7 +109,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-videos",
         type=int,
         default=1000,
-        help="Safety cap for recent uploads to inspect. Default: 1000.",
+        help="Maximum pending uploads to process per incremental batch. Default: 1000.",
     )
     update_channel.add_argument(
         "--max-comments",
@@ -344,7 +344,7 @@ def run_index_channel(
     backfill_state = db.get_backfill_state(channel_info.channel_id) if backfill else None
     backfill_complete = bool(backfill_state is not None and backfill_state["backfill_complete"])
     latest_published_at = (
-        db.get_latest_published_at_for_channel(channel_info.channel_id)
+        db.begin_incremental_scan(channel_info.channel_id)
         if incremental
         else None
     )
@@ -368,7 +368,7 @@ def run_index_channel(
     elif incremental:
         if latest_published_at:
             log(
-                "增量更新以数据库最新发布时间 "
+                "增量更新以本轮起始发布时间 "
                 f"{latest_published_at} 为边界，只处理之后的新上传，"
                 "并检查边界视频避免遗漏。"
             )
@@ -426,7 +426,7 @@ def run_index_channel(
     past_cursor = not backfill or cursor is None or not cursor["backfill_before_published_at"]
     processed_in_batch = 0
     uploads_exhausted = True
-    playlist_limit = None if backfill else max_videos
+    playlist_limit = None if backfill or incremental else max_videos
     for upload in client.iter_uploads_playlist(
         channel_info.uploads_playlist_id,
         max_videos=playlist_limit,
@@ -434,7 +434,7 @@ def run_index_channel(
         if incremental and latest_published_at and upload.published_at:
             if upload.published_at < latest_published_at:
                 log(
-                    "已到达数据库最新发布时间之前的上传，停止本次增量检索。"
+                    "已到达本轮起始发布时间之前的上传，停止本次增量检索。"
                 )
                 break
 
@@ -452,8 +452,26 @@ def run_index_channel(
             uploads_exhausted = False
             break
 
+        if incremental:
+            # Revisit the pending window, but completed rows must not consume the
+            # batch budget or repeated capped runs could never reach older gaps.
+            known = db.get_video_index_state(upload.video_id)
+            needs_work = known is None or (
+                upload.video_id not in retried_video_ids
+                and should_process_video(
+                    db, upload.video_id,
+                    recent_rescan_days=recent_rescan_days,
+                    recent_after_days=recent_recheck_days,
+                )
+            )
+            if needs_work:
+                if processed_in_batch >= max_videos:
+                    uploads_exhausted = False
+                    break
+                processed_in_batch += 1
+        else:
+            processed_in_batch += 1
         stats.videos_seen += 1
-        processed_in_batch += 1
         db.upsert_video(
             upload.video_id,
             upload.channel_id,
@@ -546,6 +564,9 @@ def run_index_channel(
                     f"  continuing historical scan; retry remains queued for "
                     f"{upload.video_id}"
                 )
+
+    if incremental and uploads_exhausted:
+        db.finish_incremental_scan(channel_info.channel_id)
 
     if backfill and uploads_exhausted:
         db.mark_backfill_complete(channel_info.channel_id)

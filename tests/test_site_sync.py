@@ -116,6 +116,25 @@ class SiteSyncTests(unittest.TestCase):
             full_import.assert_called_once()
             incremental_import.assert_called_once()
 
+    def test_changed_site_uploads_unchanged_data_and_incomplete_baseline_is_ignored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "seed"
+            def fake_export(_db, target, on_message=None):
+                return write_snapshot(target, "v1", dataset("1"))
+            with patch.object(site_sync, "export_d1_seed", side_effect=fake_export), patch.object(
+                site_sync, "import_snapshot"
+            ) as upload:
+                for url in ("https://a.test", "https://b.test"):
+                    result = site_sync.sync_database_to_site("unused", url, "secret", output)
+                    self.assertEqual(result["sync_mode"], "full")
+                self.assertEqual(upload.call_count, 2)
+                result = site_sync.sync_database_to_site("unused", "https://b.test/", "secret", output)
+                self.assertEqual(result["sync_mode"], "skipped")
+                (site_sync._baseline_dir(output, "https://b.test") / ".complete").unlink()
+                result = site_sync.sync_database_to_site("unused", "https://b.test", "secret", output)
+                self.assertEqual(result["sync_mode"], "full")
+                self.assertEqual(upload.call_count, 3)
+
     def test_large_change_set_requires_full_sync(self):
         self.assertFalse(site_sync.should_use_incremental(site_sync.MAX_INCREMENTAL_OPERATIONS + 1, 1))
         self.assertFalse(site_sync.should_use_incremental(1, site_sync.MAX_INCREMENTAL_PAYLOAD_BYTES + 1))

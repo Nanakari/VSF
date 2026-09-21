@@ -67,6 +67,43 @@ def video(video_id, published_at, title=None):
 
 
 class IndexingTests(unittest.TestCase):
+    def test_capped_incremental_scan_resumes_across_restarts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "songs.db"
+            db = SongDatabase(path)
+            db.init_schema()
+            db.upsert_channel("channel", "Test Channel")
+            db.upsert_video("old", "channel", "old", "2026-01-01")
+            db.mark_video_index_status("old", "indexed")
+            client = FakeClient([
+                video("newest", "2026-01-04"), video("middle", "2026-01-03"),
+                video("gap", "2026-01-02"), video("old", "2026-01-01"),
+            ])
+            for _ in range(3):
+                run_index_channel(db, client, "channel", 1, 20, True,
+                                  incremental=True, on_message=lambda _: None)
+                db.close()
+                db = SongDatabase(path)
+                db.init_schema()
+            self.assertEqual(db.conn.execute("SELECT COUNT(*) FROM videos").fetchone()[0], 4)
+            self.assertEqual(db.conn.execute("SELECT COUNT(*) FROM channel_incremental_state").fetchone()[0], 0)
+            self.assertEqual(client.comment_attempts, 3)
+            db.close()
+
+    def test_interrupted_first_incremental_scan_preserves_empty_boundary(self):
+        db = SongDatabase(":memory:")
+        db.init_schema()
+        client = FakeClient([video("newest", "2026-01-03"), video("older", "2026-01-02")])
+        def interrupt(_stats):
+            raise KeyboardInterrupt()
+        with self.assertRaises(KeyboardInterrupt):
+            run_index_channel(db, client, "channel", 10, 20, True, incremental=True,
+                              on_stats=interrupt, on_message=lambda _: None)
+        run_index_channel(db, client, "channel", 10, 20, True, incremental=True,
+                          on_message=lambda _: None)
+        self.assertEqual(db.get_video_index_state("older")["index_status"], "indexed")
+        db.close()
+
     def test_cli_index_syncs_site_when_configured(self):
         manifest = {"tables": {"channels": 1}}
         sync = Mock(return_value=manifest)

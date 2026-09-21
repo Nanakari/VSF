@@ -227,9 +227,10 @@ def export_d1_seed(
     return manifest
 
 
-def _baseline_dir(output_dir: Path | str) -> Path:
+def _baseline_dir(output_dir: Path | str, base_url: str = "") -> Path:
     output_dir = Path(output_dir)
-    return output_dir.with_name(f"{output_dir.name}-baseline")
+    suffix = hashlib.sha256(base_url.rstrip("/").encode("utf-8")).hexdigest()[:24] if base_url else ""
+    return output_dir.with_name(f"{output_dir.name}-baseline" + (f"-{suffix}" if suffix else ""))
 
 
 def _read_snapshot(
@@ -513,10 +514,10 @@ def sync_database_to_site(
 ) -> dict[str, object]:
     output_dir = Path(output_dir)
     manifest = export_d1_seed(database_path, output_dir, on_message=on_message)
-    baseline_dir = _baseline_dir(output_dir)
+    baseline_dir = _baseline_dir(output_dir, base_url)
     previous_manifest: dict[str, object] | None = None
     try:
-        previous_manifest, _ = _read_snapshot(baseline_dir)
+        previous_manifest, _ = _read_snapshot(baseline_dir, require_complete=True)
     except (OSError, TypeError, ValueError, json.JSONDecodeError):
         _emit(on_message, "未找到可用的站点同步基线，将执行完整同步。")
 

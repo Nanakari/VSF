@@ -90,6 +90,12 @@ class SongDatabase:
                 FOREIGN KEY (channel_id) REFERENCES channels(channel_id)
             );
 
+            CREATE TABLE IF NOT EXISTS channel_incremental_state (
+                channel_id TEXT PRIMARY KEY,
+                published_after TEXT,
+                FOREIGN KEY (channel_id) REFERENCES channels(channel_id) ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS songs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 channel_id TEXT NOT NULL,
@@ -474,6 +480,25 @@ class SongDatabase:
         self.conn.execute(
             "DELETE FROM channel_index_state WHERE channel_id = ?",
             (channel_id,),
+        )
+        self.conn.commit()
+
+    def begin_incremental_scan(self, channel_id: str) -> str | None:
+        """Keep the original boundary until the entire upload window is scanned."""
+        self.conn.execute(
+            "INSERT OR IGNORE INTO channel_incremental_state (channel_id, published_after) "
+            "VALUES (?, ?)",
+            (channel_id, self.get_latest_published_at_for_channel(channel_id)),
+        )
+        self.conn.commit()
+        return self.conn.execute(
+            "SELECT published_after FROM channel_incremental_state WHERE channel_id = ?",
+            (channel_id,),
+        ).fetchone()["published_after"]
+
+    def finish_incremental_scan(self, channel_id: str) -> None:
+        self.conn.execute(
+            "DELETE FROM channel_incremental_state WHERE channel_id = ?", (channel_id,)
         )
         self.conn.commit()
 

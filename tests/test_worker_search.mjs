@@ -74,6 +74,29 @@ function groupIds(payload) {
   return payload.groups.map((group) => group.id);
 }
 
+test("long queries do not match embedded short song titles in the shared contract", async (t) => {
+  const contract = JSON.parse(fs.readFileSync(new URL("./fixtures/short_title_contract.json", import.meta.url), "utf8"));
+  const db = await createMigratedDb();
+  t.after(() => db.close());
+  await db.prepare("INSERT INTO channels (channel_id, channel_title) VALUES ('short', 'Short titles')").run();
+  await db.prepare("INSERT INTO videos (video_id, channel_id, title, published_at, url, indexed_at) VALUES ('video', 'short', 'karaoke', '2026-01-01', '', '2026-01-01')").run();
+  for (const [index, title] of contract.titles.entries()) {
+    const key = title.toLowerCase().replaceAll(" ", "");
+    await db.prepare("INSERT INTO song_groups (group_key, song_title, artist, title_search, artist_search, entry_count, channel_count) VALUES (?, ?, '', ?, '', 1, 1)")
+      .bind(key, title, JSON.stringify({ normalized: [title.toLowerCase()], compact: [key] })).run();
+    await db.prepare("INSERT INTO songs (id, channel_id, canonical_song_title, normalized_song_title, artist, group_key, created_at, updated_at) VALUES (?, 'short', ?, ?, '', ?, '', '')")
+      .bind(index + 1, title, title.toLowerCase(), key).run();
+    await db.prepare("INSERT INTO song_entries (id, song_id, group_key, video_id, timestamp_text, seconds, raw_song_title, normalized_song_title, source_comment, jump_url, created_at) VALUES (?, ?, ?, 'video', '0:01', 1, ?, ?, '', '', '')")
+      .bind(index + 1, index + 1, key, title, title.toLowerCase()).run();
+  }
+  for (const query of contract.queries) {
+    for (const channel of ["", "short"]) {
+      const payload = await getJson({ DB: db }, { song: query.song, channel });
+      assert.deepEqual(payload.groups.map(g => g.songTitle).sort(), [...query.expected].sort(), query.song);
+    }
+  }
+});
+
 test("Worker search follows the shared grouped contract without songs.artist_search", async (t) => {
   const db = await createDb();
   t.after(() => db.close());

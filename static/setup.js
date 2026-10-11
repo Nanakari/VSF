@@ -6,14 +6,18 @@
   const syncSiteButton = document.querySelector("#sync-site-button");
   const confirmDeleteButton = document.querySelector("#confirm-delete-button");
   const exitButton = document.querySelector("#exit-button");
-  const updateChannelButtons = document.querySelectorAll(".update-channel-button");
-  const deleteChannelButtons = document.querySelectorAll(".delete-channel-button");
+  let updateChannelButtons = [...document.querySelectorAll(".update-channel-button")];
+  let deleteChannelButtons = [...document.querySelectorAll(".delete-channel-button")];
+  const channels = document.querySelector("#managed-channels");
+  const channelListError = document.querySelector("#channel-list-error");
+  const retryChannels = document.querySelector("#retry-channels");
   const message = document.querySelector("#status-message");
   const log = document.querySelector("#job-log");
   const deleteDialog = document.querySelector("#delete-dialog");
   const deleteConfirmForm = document.querySelector("#delete-confirm-form");
   const deleteChannelId = document.querySelector("#delete-channel-id");
   const deleteConfirmation = document.querySelector("#delete-confirmation");
+  const deleteError = document.querySelector("#delete-error");
   const deleteDialogSummary = document.querySelector("#delete-dialog-summary");
   const cancelDelete = document.querySelector("#cancel-delete");
   let deleteChannelTitle = "";
@@ -23,6 +27,7 @@
   let requestPending = false;
   let statusPending = false;
   let statusGeneration = 0;
+  let channelRequestId = 0;
   const statMap = {
     videos_seen: document.querySelector("#videos-seen"),
     videos_indexed: document.querySelector("#videos-indexed"),
@@ -38,6 +43,7 @@
     saveSiteConfigButton.disabled = disabled;
     syncSiteButton.disabled = disabled;
     confirmDeleteButton.disabled = disabled;
+    retryChannels.disabled = disabled;
     deleteChannelButtons.forEach((deleteButton) => {
       deleteButton.disabled = disabled;
     });
@@ -89,7 +95,7 @@
     void startIndexTask(new FormData(form), "正在启动索引任务...");
   });
 
-  updateChannelButtons.forEach((updateButton) => {
+  const bindUpdateButton = (updateButton) => {
     updateButton.addEventListener("click", () => {
       const channelId = updateButton.dataset.channelId || "";
       const channelTitle = updateButton.dataset.channelTitle || channelId;
@@ -103,7 +109,8 @@
         `正在对“${channelTitle}”执行${mode === "backfill" ? "历史回填" : "增量更新"}...`
       );
     });
-  });
+  };
+  updateChannelButtons.forEach(bindUpdateButton);
 
   saveSiteConfigButton.addEventListener("click", () => {
     void postAction(root.dataset.saveConfigUrl, new FormData(form), "正在保存站点同步设置...");
@@ -113,32 +120,100 @@
     void postAction(root.dataset.syncUrl, new FormData(form), "正在同步站点数据...", "sync-site");
   });
 
-  deleteChannelButtons.forEach((deleteButton) => {
+  const setDeleteError = (text) => {
+    deleteError.textContent = text;
+    deleteError.hidden = !text;
+    deleteConfirmation.setAttribute("aria-invalid", String(Boolean(text)));
+  };
+  const bindDeleteButton = (deleteButton) => {
     deleteButton.addEventListener("click", () => {
       deleteChannelTitle = deleteButton.dataset.channelTitle || "";
       deleteChannelId.value = deleteButton.dataset.channelId || "";
       deleteConfirmation.value = "";
+      setDeleteError("");
       confirmDeleteButton.disabled = false;
       deleteDialogSummary.textContent = `将删除“${deleteChannelTitle}”及其 ${deleteButton.dataset.channelVideoCount || 0} 个视频、${deleteButton.dataset.channelSongCount || 0} 首歌曲和 ${deleteButton.dataset.channelEntryCount || 0} 个时间点。`;
       deleteDialog.showModal();
       deleteConfirmation.focus();
     });
-  });
+  };
+  deleteChannelButtons.forEach(bindDeleteButton);
+
+  const makeElement = (tag, className, text) => {
+    const element = document.createElement(tag);
+    element.className = className;
+    if (text !== undefined) element.textContent = text;
+    return element;
+  };
+  const refreshChannels = async () => {
+    const generation = statusGeneration;
+    const requestId = ++channelRequestId;
+    try {
+      const response = await fetch(root.dataset.channelsUrl, { cache: "no-store" });
+      if (!response.ok) throw new Error("channel list unavailable");
+      const data = await response.json();
+      if (!Array.isArray(data.channels)) throw new Error("invalid channel list");
+      if (generation !== statusGeneration || requestPending || requestId !== channelRequestId) return;
+      const cards = [];
+      updateChannelButtons = [];
+      deleteChannelButtons = [];
+      for (const channel of data.channels) {
+        const card = makeElement("article", "managed-channel-card");
+        const info = makeElement("div", "");
+        info.append(makeElement("strong", "", channel.channel_title));
+        info.append(makeElement("span", "", `${channel.video_count} 个视频 · ${channel.song_count} 首歌曲 · ${channel.entry_count} 个时间点`));
+        const actions = makeElement("div", "channel-card-actions");
+        for (const [mode, label] of [["incremental", "增量更新"], ["backfill", "历史回填"], ["delete", "删除频道"]]) {
+          const isDelete = mode === "delete";
+          const action = makeElement("button", isDelete ? "danger-button delete-channel-button" : "secondary-button update-channel-button", label);
+          action.type = "button";
+          Object.assign(action.dataset, {
+            channelId: channel.channel_id, channelTitle: channel.channel_title, mode,
+            channelVideoCount: channel.video_count, channelSongCount: channel.song_count, channelEntryCount: channel.entry_count,
+          });
+          if (isDelete) {
+            bindDeleteButton(action);
+            deleteChannelButtons.push(action);
+          } else {
+            bindUpdateButton(action);
+            updateChannelButtons.push(action);
+          }
+          actions.append(action);
+        }
+        card.append(info, actions);
+        cards.push(card);
+      }
+      if (!cards.length) cards.push(makeElement("p", "empty", "当前数据库还没有频道。"));
+      channels.replaceChildren(...cards);
+      channelListError.hidden = true;
+      retryChannels.hidden = true;
+    } catch (_) {
+      if (generation !== statusGeneration || requestPending || requestId !== channelRequestId) return;
+      channelListError.textContent = "频道列表刷新失败，现有列表可能已过期。请重试刷新。";
+      channelListError.hidden = false;
+      retryChannels.hidden = false;
+    }
+  };
+  retryChannels.addEventListener("click", () => { void refreshChannels(); });
 
   cancelDelete.addEventListener("click", () => deleteDialog.close());
+  deleteConfirmation.addEventListener("input", () => setDeleteError(""));
 
   deleteConfirmForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (deleteConfirmation.value !== deleteChannelTitle) {
-      message.textContent = "频道名称不匹配，未执行删除。";
+      setDeleteError("频道名称不匹配，未执行删除。请输入完整频道名称。");
       deleteConfirmation.focus();
       return;
     }
+    setDeleteError("");
     const deleteData = new FormData(deleteConfirmForm);
     deleteData.append("site_base_url", form.elements.site_base_url.value);
     deleteData.append("site_seed_token", form.elements.site_seed_token.value);
     if (await postAction(deleteConfirmForm.action, deleteData, "正在删除频道...", "delete-channel")) {
       deleteDialog.close();
+    } else {
+      setDeleteError(formError || "删除未能开始，请重试。");
     }
   });
 
@@ -191,11 +266,11 @@
       setIndexControlsDisabled(Boolean(data.running));
       if (reloadAfterDelete && data.operation === "delete-channel" && data.done && !data.running) {
         reloadAfterDelete = false;
-        if (data.local_changed) window.setTimeout(() => window.location.reload(), 1200);
+        if (data.local_changed) await refreshChannels();
       }
       if (reloadAfterIndex && data.operation === "index" && data.done && !data.running) {
         reloadAfterIndex = false;
-        window.setTimeout(() => window.location.reload(), 1200);
+        if (data.local_changed) await refreshChannels();
       }
     } catch (_) {
       if (generation === statusGeneration && !formError && !requestPending) {

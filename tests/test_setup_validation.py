@@ -70,6 +70,27 @@ class SetupValidationTests(unittest.TestCase):
         self.assertIn(b'data-channel-id="channel"', response.data)
         self.assertIn("增量更新".encode("utf-8"), response.data)
 
+    def test_channel_list_requires_local_session_and_reflects_deletion(self):
+        self.assertEqual(indexer_app.app.test_client().get("/channels").status_code, 403)
+        client = self._authorized_client()
+        self.assertEqual(client.get("/channels").json, {"channels": []})
+        db = SongDatabase(self.app_dir / "songs.sqlite3")
+        try:
+            db.upsert_channel("channel", "<Channel & name>")
+            db.upsert_video("video", "channel", "karaoke", "2026-01-01")
+            response = client.get("/channels")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(len(response.json["channels"]), 1)
+            channel = response.json["channels"][0]
+            self.assertEqual(channel["channel_title"], "<Channel & name>")
+            self.assertEqual(channel["video_count"], 1)
+            self.assertEqual(channel["song_count"], 0)
+            self.assertEqual(client.get("/channels", environ_base={"REMOTE_ADDR": "192.0.2.10"}).status_code, 403)
+            db.delete_channel("channel")
+            self.assertEqual(client.get("/channels").json, {"channels": []})
+        finally:
+            db.close()
+
     def test_invalid_channel_or_mode_returns_400_without_saving_key(self):
         client = self._authorized_client()
         save_key = Mock()

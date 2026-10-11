@@ -1723,7 +1723,7 @@ def group_matches_query(
             for title_key in title_keys
         )
     for title_key in title_keys:
-        if query_key in title_key or title_key in query_key:
+        if query_key in title_key:
             return True
         if is_similar_song_key(title_key, query_key):
             return True

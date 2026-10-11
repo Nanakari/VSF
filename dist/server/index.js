@@ -118,7 +118,7 @@ function songMatches(row, search) {
     return titleKeys(row).some((titleKey) => titleKey === queryKey || titleKey.startsWith(queryKey) || similarSongKey(titleKey, queryKey));
   }
   if (normalizedTitleKeys(row).some((title) => title.includes(search.song))) return true;
-  return titleKeys(row).some((titleKey) => titleKey === queryKey || titleKey.startsWith(queryKey) || titleKey.includes(queryKey) || queryKey.includes(titleKey) || similarSongKey(titleKey, queryKey));
+  return titleKeys(row).some((titleKey) => titleKey === queryKey || titleKey.startsWith(queryKey) || titleKey.includes(queryKey) || similarSongKey(titleKey, queryKey));
 }
 function songRelevance(row, search) {
   if (!search.song) return 5;

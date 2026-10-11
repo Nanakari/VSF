@@ -158,6 +158,17 @@ def index():
 
 
 
+@app.get("/channels")
+def channel_list():
+    require_local_management()
+    db = SongDatabase(get_database_path())
+    try:
+        db.init_schema()
+        return jsonify({"channels": [dict(row) for row in db.list_channels()]})
+    finally:
+        db.close()
+
+
 @app.get("/search")
 def open_search():
     require_local_management()

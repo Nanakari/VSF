@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+- Reject reverse substring song matches so long queries do not incorrectly return short titles such as `a` or `W`, consistently in Python and Worker search.
+- Refresh channel cards in place after indexing/deletion, retain the current form settings, and support retrying a failed list refresh without reloading.
+- Keep deletion validation and request errors inside the confirmation dialog, with accessible persistent feedback.
+- Add shared short-title search contracts and setup regressions for success/failure, refreshed actions, list retries, and deletion errors.
+
 - Make channel updates idempotent: preserve video timestamps and retained song/entry IDs, recover older discovered/filtered uploads, and retain progress on quota failure.
 - Resolve handle URLs through the API directly; preserve quota errors and fix empty/undated historical backfill progress.
 - Allow local-only channel deletion, revalidate names inside the delete transaction, and add independent site-sync retries with shared job exclusion.

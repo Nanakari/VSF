@@ -25,6 +25,8 @@ export class Element {
     await Promise.all((this.events.get(name) || []).map((callback) => callback({ preventDefault() {} })));
   }
   focus() {}
+  setAttribute(name, value) { (this.attributes ||= {})[name] = String(value); }
+  getAttribute(name) { return this.attributes?.[name] ?? null; }
   showModal() { this.open = true; }
   close() { this.open = false; }
   find(className) {

@@ -126,7 +126,6 @@ function songMatches(row, search) {
     titleKey === queryKey
     || titleKey.startsWith(queryKey)
     || titleKey.includes(queryKey)
-    || queryKey.includes(titleKey)
     || similarSongKey(titleKey, queryKey)
   ));
 }

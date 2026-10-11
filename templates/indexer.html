@@ -12,6 +12,7 @@
       data-save-config-url="{{ url_for('save_site_config') }}"
       data-sync-url="{{ url_for('start_site_sync') }}"
       data-status-url="{{ url_for('status') }}"
+      data-channels-url="{{ url_for('channel_list') }}"
       data-shutdown-url="{{ url_for('shutdown') }}"
       data-close-url="{{ url_for('shutdown_close') }}"
       data-ping-url="{{ url_for('client_ping') }}"
@@ -94,8 +95,10 @@
             <p class="subtle">增量更新检查新上传；历史回填继续扫描旧视频。删除会清理本地数据；配置了站点时自动同步，失败后可单独重试同步。</p>
           </div>
         </div>
+        <p id="channel-list-error" role="alert" hidden></p>
+        <button id="retry-channels" class="secondary-button" type="button" hidden>重试刷新频道列表</button>
+        <div id="managed-channels" class="managed-channel-grid">
         {% if channels %}
-          <div class="managed-channel-grid">
             {% for channel in channels %}
               <article class="managed-channel-card">
                 <div>
@@ -128,10 +131,10 @@
                 </div>
               </article>
             {% endfor %}
-          </div>
         {% else %}
           <p class="empty">当前数据库还没有频道。</p>
         {% endif %}
+        </div>
       </section>
 
       <dialog id="delete-dialog" class="delete-dialog">
@@ -142,8 +145,9 @@
           <input id="delete-channel-id" name="channel_id" type="hidden">
           <label>
             <span>频道名称</span>
-            <input id="delete-confirmation" name="confirmation" autocomplete="off" required>
+            <input id="delete-confirmation" name="confirmation" autocomplete="off" aria-describedby="delete-error" required>
           </label>
+          <p id="delete-error" role="alert" hidden></p>
           <div class="dialog-actions">
             <button id="cancel-delete" class="secondary-button" type="button">取消</button>
             <button id="confirm-delete-button" class="danger-button" type="submit">确认删除</button>

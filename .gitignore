@@ -10,6 +10,7 @@ __pycache__/
 .coverage.*
 htmlcov/
 .playwright-cli/
+output/playwright/
 node_modules/
 
 # Local OS/editor metadata

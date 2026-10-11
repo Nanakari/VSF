@@ -79,6 +79,24 @@ def compact_group_result(groups: list[dict[str, object]]) -> list[dict[str, obje
 
 
 class SearchContractTests(unittest.TestCase):
+    def test_long_queries_do_not_match_embedded_short_song_titles(self) -> None:
+        contract = json.loads(FIXTURE.with_name("short_title_contract.json").read_text(encoding="utf-8"))
+        db = SongDatabase(":memory:")
+        self.addCleanup(db.close)
+        db.init_schema()
+        db.upsert_channel("short", "Short titles")
+        db.upsert_video("video", "short", "karaoke", "2026-01-01")
+        db.insert_song_entries("video", [
+            TimelineEntry(str(index), index, title, normalize_song_title(title))
+            for index, title in enumerate(contract["titles"], 1)
+        ], "test timeline")
+        for query in contract["queries"]:
+            with self.subTest(song=query["song"]):
+                groups = db.search_grouped(song_query=query["song"])
+                self.assertEqual(sorted(group["song_title"] for group in groups), sorted(query["expected"]))
+                flat = search_songs(db, query["song"])
+                self.assertEqual(sorted(row["raw_song_title"] for row in flat), sorted(query["expected"]))
+
     def setUp(self) -> None:
         self.fixture = load_fixture()
         self.db = make_database(self.fixture)

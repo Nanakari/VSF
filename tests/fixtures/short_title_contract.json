@@ -1,0 +1,17 @@
+{
+  "titles": ["a", "W", "愛", "KING", "Stellar Stellar", "Starlight"],
+  "queries": [
+    {"song": "StellarStellar", "expected": ["Stellar Stellar"]},
+    {"song": "unlikely-song-acceptance-xyz", "expected": []},
+    {"song": "qzxwvv999888777", "expected": []},
+    {"song": "notkingunrelated", "expected": []},
+    {"song": "愛してるxxxxx", "expected": []},
+    {"song": "a", "expected": ["a"]},
+    {"song": "W", "expected": ["W"]},
+    {"song": "愛", "expected": ["愛"]},
+    {"song": "KING", "expected": ["KING"]},
+    {"song": "stellar", "expected": ["Stellar Stellar"]},
+    {"song": "larste", "expected": ["Stellar Stellar"]},
+    {"song": "Starligh", "expected": ["Starlight"]}
+  ]
+}

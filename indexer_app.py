@@ -62,6 +62,7 @@ job_state: dict[str, object] = {
 }
 active_clients: dict[str, float] = {}
 active_clients_lock = threading.Lock()
+clients_idle_since: float | None = None
 shutdown_timer: threading.Timer | None = None
 
 
@@ -356,22 +357,27 @@ def status():
 
 @app.post("/client-ping")
 def client_ping():
+    global clients_idle_since
     require_local_management()
     client_id = get_client_id()
     if client_id:
         with active_clients_lock:
             active_clients[client_id] = time.monotonic()
+            clients_idle_since = None
         schedule_shutdown_check()
     return ("", 204)
 
 
 @app.post("/client-close")
 def client_close():
+    global clients_idle_since
     require_local_management()
     client_id = get_client_id()
     if client_id:
         with active_clients_lock:
-            active_clients.pop(client_id, None)
+            removed = active_clients.pop(client_id, None)
+            if removed is not None and not active_clients:
+                clients_idle_since = time.monotonic()
     schedule_shutdown_check()
     return ("", 204)
 
@@ -846,18 +852,24 @@ def schedule_shutdown_check() -> None:
 
 
 def shutdown_if_still_idle() -> None:
-    global shutdown_timer
+    global shutdown_timer, clients_idle_since
     if not AUTO_EXIT_ENABLED:
         return
     shutdown_timer = None
     if is_index_job_running():
         schedule_shutdown_check()
         return
-    if has_active_clients():
-        schedule_shutdown_check()
-        return
-    logger.info("No setup clients remain; exiting VTuber Song Finder Setup")
-    os._exit(0)
+    with active_clients_lock:
+        if not active_clients:
+            now = time.monotonic()
+            if clients_idle_since is None:
+                clients_idle_since = now
+            # Wait from the last tab closing, not from an older periodic timer.
+            if now - clients_idle_since >= SHUTDOWN_DELAY_SECONDS:
+                logger.info("No setup clients remain; exiting VTuber Song Finder Setup")
+                os._exit(0)
+                return
+    schedule_shutdown_check()
 
 
 

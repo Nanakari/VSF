@@ -4,6 +4,10 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-10-11
+
+- Wait a full idle grace period after the last browser page closes, preventing frozen Windows apps from exiting during search navigation or reloads.
+- Add portable lifecycle regressions for page transitions, multiple tabs, and active indexing jobs; rebuild and verify both Windows executables.
 - Reject reverse substring song matches so long queries do not incorrectly return short titles such as `a` or `W`, consistently in Python and Worker search.
 - Refresh channel cards in place after indexing/deletion, retain the current form settings, and support retrying a failed list refresh without reloading.
 - Keep deletion validation and request errors inside the confirmation dialog, with accessible persistent feedback.

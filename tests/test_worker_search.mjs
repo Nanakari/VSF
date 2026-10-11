@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import worker from "../worker/index.js";
-import { SqliteD1 } from "./helpers/sqlite_d1.mjs";
+import { createMigratedDb } from "./helpers/worker_db.mjs";
 
 const fixturePath = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "search_contract.json");
 const fixture = JSON.parse(fs.readFileSync(fixturePath, "utf8"));
@@ -18,21 +18,7 @@ function titleSearch(group) {
 }
 
 async function createDb() {
-  const db = new SqliteD1();
-  await db.prepare("PRAGMA foreign_keys = ON").run();
-  const migrationDir = new URL("../drizzle/", import.meta.url);
-  const migrationFiles = fs.readdirSync(migrationDir)
-    .filter((name) => name.endsWith(".sql"))
-    .sort();
-  for (const name of migrationFiles) {
-    const migration = fs.readFileSync(new URL(name, migrationDir), "utf8");
-    const statements = migration
-      .split(/-->\s*statement-breakpoint/)
-      .map((statement) => statement.trim())
-      .filter(Boolean);
-    for (const statement of statements) await db.prepare(statement).run();
-  }
-
+  const db = await createMigratedDb();
   await db.batch(fixture.channels.map((row) => db.prepare(
     "INSERT INTO channels (channel_id, channel_title) VALUES (?, ?)",
   ).bind(row.channel_id, row.channel_title)));
@@ -190,4 +176,25 @@ test("Worker entries use one JSON bind for large merged song sets", async (t) =>
   const payload = await response.json();
   assert.equal(payload.total, 120);
   assert.deepEqual(payload.entries.map((row) => row.timestampText), ["10:119"]);
+});
+
+test("channel IDs take precedence over matching display names", async (t) => {
+  const db = await createDb();
+  t.after(() => db.close());
+  await db.prepare("UPDATE channels SET channel_title = 'chan-a fan archive' WHERE channel_id = 'chan-b'").run();
+  const payload = await getJson({ DB: db }, { channel: "chan-a", song: "Stellar Stellar" });
+  assert.equal(payload.groups.length, 1);
+  assert.deepEqual(payload.groups[0].channels.map((channel) => channel.id), ["chan-a"]);
+  assert.equal(payload.groups[0].entryCount, 3);
+});
+
+test("scoped search reuses its aggregate instead of reading entries twice", async (t) => {
+  const db = await createDb();
+  t.after(() => db.close());
+  const statements = [];
+  const measured = { prepare(sql) { statements.push(sql); return db.prepare(sql); } };
+  const payload = await getJson({ DB: measured }, { artist: "Ado", song: "Stellar Stellar" });
+  assert.equal(payload.groups[0].entryCount, 5);
+  assert.equal(payload.groups[0].channels.reduce((total, channel) => total + channel.entryCount, 0), 5);
+  assert.equal(statements.filter((sql) => sql.includes("song_entries")).length, 1);
 });

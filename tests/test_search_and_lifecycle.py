@@ -21,6 +21,20 @@ def entry(raw_title: str, seconds: int) -> TimelineEntry:
 
 
 class SearchAndLifecycleTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        for name, value in (
+            ("get_database_path", Path(directory.name) / "songs.sqlite3"),
+            ("get_app_dir", Path(directory.name)),
+            ("read_saved_api_key", ""),
+            ("read_saved_site_base_url", ""),
+            ("read_saved_site_seed_token", ""),
+        ):
+            patcher = patch.object(indexer_app, name, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def test_repeated_song_upsert_preserves_updated_at_when_metadata_is_unchanged(self):
         db = SongDatabase(":memory:")
         db.init_schema()

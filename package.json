@@ -2,7 +2,11 @@
   "name": "vtuber-song-finder-site",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
+    "check": "npm run build && npm run validate && npm test",
     "build": "node scripts/build-worker.mjs",
     "validate": "node scripts/validate-worker.mjs",
     "test": "node scripts/test-worker.mjs",
@@ -12,6 +16,7 @@
     "drizzle-orm": "0.45.2"
   },
   "devDependencies": {
-    "drizzle-kit": "0.31.10"
+    "drizzle-kit": "0.31.10",
+    "esbuild": "0.25.12"
   }
 }

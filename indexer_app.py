@@ -27,7 +27,12 @@ from config import (
     get_youtube_api_key,
 )
 from database import SongDatabase
-from main import DEFAULT_RECENT_RESCAN_DAYS, IndexStats, run_index_channel
+from indexing import (
+    DEFAULT_MAX_COMMENTS,
+    DEFAULT_RECENT_RESCAN_DAYS,
+    IndexStats,
+    run_index_channel,
+)
 from site_sync import sync_database_to_site
 from youtube_client import (
     QuotaExceededError,
@@ -37,7 +42,6 @@ from youtube_client import (
 
 
 DEFAULT_MAX_VIDEOS = 1000
-DEFAULT_MAX_COMMENTS = 100
 SETUP_PORT = 5001
 SHUTDOWN_DELAY_SECONDS = 3
 AUTO_EXIT_ENABLED = bool(getattr(sys, "frozen", False))
@@ -51,6 +55,7 @@ job_state: dict[str, object] = {
     "done": False,
     "ok": False,
     "operation": "idle",
+    "local_changed": False,
     "message": "等待开始索引。",
     "log": [],
     "stats": {},
@@ -223,31 +228,21 @@ def start_index():
         job_state["operation"] = "index"
         job_state["message"] = "索引任务已开始。"
 
-    try:
-        worker = threading.Thread(
-            target=run_index_job,
-            args=(
-                api_key,
-                channel,
-                max_videos,
-                max_comments,
-                include_all,
-                mode,
-                reset_backfill,
-                recent_rescan_days,
-                site_base_url,
-                site_seed_token,
-            ),
-            daemon=True,
-        )
-        worker.start()
-    except Exception:
-        logger.exception("Failed to start indexer job")
-        with job_lock:
-            # A failed Thread construction/start must not leave the setup UI
-            # reporting a task that can never finish.
-            if job_state["running"]:
-                reset_job_state()
+    if not launch_background_job(
+        run_index_job,
+        (
+            api_key,
+            channel,
+            max_videos,
+            max_comments,
+            include_all,
+            mode,
+            reset_backfill,
+            recent_rescan_days,
+            site_base_url,
+            site_seed_token,
+        ),
+    ):
         return jsonify({"ok": False, "message": "无法启动索引任务。"}), 500
     return jsonify({"ok": True, "message": "索引任务已开始。"})
 
@@ -255,20 +250,45 @@ def start_index():
 @app.post("/save-site-config")
 def save_site_config():
     require_local_management()
-    base_url = request.form.get("site_base_url", "").strip()
-    seed_token = request.form.get("site_seed_token", "").strip()
-    if not base_url:
-        base_url = read_saved_site_base_url()
-    if not seed_token:
-        seed_token = read_saved_site_seed_token()
-    try:
-        save_site_sync_config(base_url, seed_token)
-    except ValueError as exc:
-        return jsonify({"ok": False, "message": str(exc)}), 400
-    except OSError:
-        logger.exception("Failed to save Site sync configuration")
-        return jsonify({"ok": False, "message": "无法保存站点同步配置。"}), 500
+    with job_lock:
+        if job_state["running"]:
+            return jsonify({"ok": False, "message": "已有任务正在运行。"}), 409
+        try:
+            base_url, seed_token = resolve_site_sync_config(
+                request.form.get("site_base_url", ""), request.form.get("site_seed_token", ""),
+            )
+            save_site_sync_config(base_url, seed_token)
+        except ValueError as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 400
+        except OSError:
+            logger.exception("Failed to save Site sync configuration")
+            return jsonify({"ok": False, "message": "无法保存站点同步配置。"}), 500
     return jsonify({"ok": True, "message": "站点同步配置已保存。"})
+
+
+@app.post("/sync-site")
+def start_site_sync():
+    require_local_management()
+    with job_lock:
+        if job_state["running"]:
+            return jsonify({"ok": False, "message": "已有任务正在运行。"}), 409
+        try:
+            base_url, seed_token = resolve_site_sync_config(
+                request.form.get("site_base_url", ""), request.form.get("site_seed_token", ""),
+                persist=True,
+            )
+            if not base_url:
+                raise ValueError("请先配置站点地址和同步令牌。")
+        except ValueError as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 400
+        except OSError:
+            logger.exception("Failed to save Site sync configuration")
+            return jsonify({"ok": False, "message": "无法保存站点同步配置。"}), 500
+        reset_job_state()
+        job_state.update(running=True, operation="sync-site", message="正在同步站点数据。")
+    if not launch_background_job(run_site_sync_job, (base_url, seed_token)):
+        return jsonify({"ok": False, "message": "无法启动同步任务。"}), 500
+    return jsonify({"ok": True, "message": "站点同步已开始。"}), 202
 
 
 @app.post("/delete-channel")
@@ -292,49 +312,29 @@ def delete_channel():
     if confirmation != channel["channel_title"]:
         return jsonify({"ok": False, "message": "确认名称不匹配，未执行删除。"}), 400
 
-    base_url = request.form.get("site_base_url", "").strip() or read_saved_site_base_url()
-    seed_token = request.form.get("site_seed_token", "").strip() or read_saved_site_seed_token()
-    try:
-        base_url = normalize_site_base_url(base_url)
-    except ValueError as exc:
-        return jsonify({"ok": False, "message": str(exc)}), 400
-    if not seed_token:
-        return jsonify(
-            {
-                "ok": False,
-                "message": "请先配置站点同步令牌，删除后系统会自动同步站点数据。",
-            }
-        ), 400
-
-    if request.form.get("site_base_url", "").strip() or request.form.get("site_seed_token", "").strip():
-        try:
-            save_site_sync_config(base_url, seed_token)
-        except (OSError, ValueError) as exc:
-            logger.exception("Failed to save Site sync configuration before deletion")
-            return jsonify({"ok": False, "message": str(exc) or "无法保存站点同步配置。"}), 400
-
     with job_lock:
         if job_state["running"]:
             return jsonify({"ok": False, "message": "已有任务正在运行。"}), 409
+        try:
+            base_url, seed_token = resolve_site_sync_config(
+                request.form.get("site_base_url", ""), request.form.get("site_seed_token", ""),
+                persist=True,
+            )
+        except ValueError as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 400
+        except OSError:
+            logger.exception("Failed to save Site sync configuration before deletion")
+            return jsonify({"ok": False, "message": "无法保存站点同步配置。"}), 500
         reset_job_state()
         job_state["running"] = True
         job_state["operation"] = "delete-channel"
         job_state["message"] = f"正在准备删除频道：{channel['channel_title']}。"
 
-    try:
-        worker = threading.Thread(
-            target=run_delete_channel_job,
-            args=(channel_id, str(channel["channel_title"]), base_url, seed_token),
-            daemon=True,
-        )
-        worker.start()
-    except Exception:
-        logger.exception("Failed to start channel deletion job")
-        with job_lock:
-            if job_state["running"]:
-                reset_job_state()
+    if not launch_background_job(
+        run_delete_channel_job, (channel_id, str(channel["channel_title"]), base_url, seed_token),
+    ):
         return jsonify({"ok": False, "message": "无法启动删除任务。"}), 500
-    return jsonify({"ok": True, "message": "删除任务已开始，正在同步站点数据。"}), 202
+    return jsonify({"ok": True, "message": "删除任务已开始。"}), 202
 
 @app.get("/status")
 def status():
@@ -401,6 +401,56 @@ def handle_unexpected_error(error: Exception):
     return "Internal server error. See logs/setup.log.", 500
 
 
+def launch_background_job(target, args: tuple) -> bool:
+    """Start a reserved job outside job_lock; an immediate worker may finish here."""
+    try:
+        threading.Thread(target=target, args=args, daemon=True).start()
+    except Exception:
+        logger.exception("Failed to start background job")
+        finish_job(False, "无法启动后台任务，请重试。", IndexStats())
+        return False
+    return True
+
+
+def synchronize_site(site_base_url: str, site_seed_token: str) -> str:
+    add_log("正在计算站点变更并同步，请稍候。")
+    manifest = sync_database_to_site(
+        get_database_path(), site_base_url, site_seed_token,
+        get_app_dir() / "build" / "d1-seed", on_message=add_log,
+    )
+    tables = manifest.get("tables", {})
+    return f"站点同步完成（{manifest.get('sync_mode', 'full')}，{tables.get('channels', 0)} 个频道）。"
+
+
+def complete_local_job(
+    message: str, stats: IndexStats, site_base_url: str, site_seed_token: str,
+) -> None:
+    with job_lock:
+        job_state["local_changed"] = True
+    if not site_base_url and not site_seed_token:
+        finish_job(True, f"{message}；未配置站点同步，仅更新本地数据。", stats)
+        return
+    try:
+        if not site_base_url or not site_seed_token:
+            raise ValueError("站点地址和同步令牌必须同时配置")
+        result = synchronize_site(site_base_url, site_seed_token)
+    except Exception as exc:
+        logger.exception("Site sync after local operation failed")
+        finish_job(False, f"{message}，但站点同步失败：{exc}。确认配置后点击“立即同步站点”重试。", stats)
+    else:
+        finish_job(True, f"{message}，{result}", stats)
+
+
+def run_site_sync_job(site_base_url: str, site_seed_token: str) -> None:
+    try:
+        result = synchronize_site(site_base_url, site_seed_token)
+    except Exception as exc:
+        logger.exception("Site sync failed")
+        finish_job(False, f"站点同步失败：{exc}。确认配置后可再次同步。", IndexStats())
+    else:
+        finish_job(True, result, IndexStats())
+
+
 def run_index_job(
     api_key: str,
     channel: str,
@@ -415,6 +465,16 @@ def run_index_job(
 ) -> None:
     db: SongDatabase | None = None
     stats = IndexStats()
+
+    def record_progress(current: IndexStats) -> None:
+        # Keep the last progress object when quota/network errors stop the run
+        # before run_index_channel can return its final value.
+        nonlocal stats
+        stats = current
+        update_stats(current)
+        with job_lock:
+            job_state["local_changed"] = True
+
     try:
         db = SongDatabase(get_database_path())
         db.init_schema()
@@ -431,7 +491,7 @@ def run_index_job(
             reset_backfill=reset_backfill,
             recent_rescan_days=recent_rescan_days,
             on_message=add_log,
-            on_stats=update_stats,
+            on_stats=record_progress,
         )
         # Release the indexing connection before export opens its own read
         # connection.  This also makes the handoff explicit: the local
@@ -440,46 +500,8 @@ def run_index_job(
             db.close()
             db = None
 
-        if site_base_url or site_seed_token:
-            if not site_base_url or not site_seed_token:
-                finish_job(
-                    False,
-                    "本地索引已完成，但站点同步配置不完整；请同时配置站点地址和同步令牌。",
-                    stats,
-                )
-                return
-
-            add_log("本地索引完成，正在计算站点变更并同步，请稍候。")
-            try:
-                manifest = sync_database_to_site(
-                    get_database_path(),
-                    site_base_url,
-                    site_seed_token,
-                    get_app_dir() / "build" / "d1-seed",
-                    on_message=add_log,
-                )
-                tables = manifest.get("tables", {})
-                sync_mode = manifest.get("sync_mode", "full")
-                failure_note = (
-                    f"（{stats.videos_failed} 个视频失败，已留待重试）"
-                    if stats.videos_failed
-                    else ""
-                )
-                finish_job(
-                    True,
-                    f"索引完成{failure_note}，站点同步完成（{sync_mode}，{tables.get('channels', 0)} 个频道）。",
-                    stats,
-                )
-            except Exception as exc:
-                logger.exception("Site resync after indexing failed")
-                finish_job(
-                    False,
-                    f"本地索引已完成，但站点同步失败：{exc}。"
-                    "可确认站点配置后重新运行索引。",
-                    stats,
-                )
-        else:
-            finish_job(True, "索引完成；未配置站点同步，站点数据未更新。", stats)
+        failure_note = f"（{stats.videos_failed} 个视频失败，已留待重试）" if stats.videos_failed else ""
+        complete_local_job(f"本地索引已完成{failure_note}", stats, site_base_url, site_seed_token)
     except QuotaExceededError as exc:
         finish_job(False, f"YouTube API quota 已用尽：{exc}", stats)
     except YouTubeAPIError as exc:
@@ -503,7 +525,7 @@ def run_delete_channel_job(
     try:
         db = SongDatabase(get_database_path())
         db.init_schema()
-        deleted = db.delete_channel(channel_id)
+        deleted = db.delete_channel(channel_id, expected_title=channel_title)
         if deleted is None:
             finish_job(False, f"频道已不存在：{channel_title}", IndexStats())
             return
@@ -520,30 +542,9 @@ def run_delete_channel_job(
         if db is not None:
             db.close()
 
-    try:
-        add_log("正在计算站点变更并同步，请稍候。")
-        manifest = sync_database_to_site(
-            get_database_path(),
-            site_base_url,
-            site_seed_token,
-            get_app_dir() / "build" / "d1-seed",
-            on_message=add_log,
-        )
-        tables = manifest.get("tables", {})
-        sync_mode = manifest.get("sync_mode", "full")
-        finish_job(
-            True,
-            f"频道 {channel_title} 已删除，站点同步完成（{sync_mode}，{tables.get('channels', 0)} 个频道）。",
-            IndexStats(),
-        )
-    except Exception as exc:
-        logger.exception("Site resync after channel deletion failed")
-        finish_job(
-            False,
-            f"频道 {channel_title} 已从本地删除，但站点同步失败：{exc}。"
-            "可确认站点配置后重新导入快照。",
-            IndexStats(),
-        )
+    complete_local_job(
+        f"频道 {channel_title} 已从本地删除", IndexStats(), site_base_url, site_seed_token,
+    )
 
 
 def reset_job_state() -> None:
@@ -553,6 +554,7 @@ def reset_job_state() -> None:
             "done": False,
             "ok": False,
             "operation": "idle",
+            "local_changed": False,
             "message": "等待开始索引。",
             "log": [],
             "stats": {},
@@ -628,7 +630,7 @@ def resolve_site_sync_config(
 ) -> tuple[str, str]:
     """Resolve optional site settings and optionally save freshly entered values.
 
-    An entirely empty configuration means local-only indexing is allowed.  A
+    An entirely empty configuration permits local-only indexing/deletion. A
     partially configured site is rejected so a successful local index cannot
     silently pretend that its cloud copy was updated.
     """

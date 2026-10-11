@@ -68,6 +68,9 @@ def export_d1_seed(
     db = SongDatabase(database_path)
     db.init_schema()
     try:
+        # Grouping and table reads must see the same local version, even when
+        # another CLI process updates or deletes a channel during the export.
+        db.conn.execute("BEGIN")
         groups = db.search_grouped(limit=100_000, offset=0)
         channels = [dict(row) for row in db.list_channels()]
         videos = [

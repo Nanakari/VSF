@@ -39,14 +39,8 @@ jobs:
           cache: pip
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
-      - name: Check installed dependencies
-        run: python -m pip check
-      - name: Compile Python sources
-        run: python -m compileall -q .
-      - name: Import application modules
-        run: python -c "import app, config, database, indexer_app, main, search, song_identity, timeline_parser, youtube_client"
-      - name: Run regression tests
-        run: python -m unittest discover -s tests -p "test_*.py" -v
+      - name: Check Python application
+        run: python scripts/check.py --scope python
 
   site:
     runs-on: ubuntu-latest
@@ -73,6 +67,5 @@ jobs:
           git diff --exit-code -- drizzle
       - name: Build and validate Worker site
         run: |
-          npm run build
-          npm run validate
-          npm test
+          python scripts/check.py --scope site
+          git diff --exit-code -- dist

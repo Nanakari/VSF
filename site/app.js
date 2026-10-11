@@ -98,7 +98,7 @@
       body.append(createElement("span", "channel-count", `${formatNumber(channel.song_count)} 首歌曲 · ${formatNumber(channel.entry_count)} 个时间点`));
       const arrow = createElement("span", "channel-arrow", "↗");
       link.append(accent, body, arrow);
-      link.href = `?channel=${encodeURIComponent(channel.channel_title)}`;
+      link.href = `?channel=${encodeURIComponent(channel.channel_id)}`;
       elements.channelGrid.append(link);
     });
   }
@@ -110,6 +110,9 @@
     const previous = createElement("button", "entry-button", "上一页");
     const label = createElement("span", "entry-page-label");
     const next = createElement("button", "entry-button", "下一页");
+    const retry = createElement("button", "entry-button entry-retry", "重试加载时间点");
+    retry.type = "button";
+    retry.hidden = true;
     let currentPage = 1;
     let pageCount = Math.max(1, Math.ceil(Number(channel.entryCount || 0) / entryPageSize));
     let entries = [];
@@ -145,6 +148,7 @@
     const loadPage = async (page) => {
       const currentRequest = ++requestId;
       loading = true;
+      retry.hidden = true;
       currentPage = page;
       render("正在载入时间点…");
       const params = new URLSearchParams({
@@ -168,6 +172,7 @@
         console.error(error);
         loading = false;
         render("时间点载入失败，请稍后重试。");
+        retry.hidden = false;
       }
     };
 
@@ -187,8 +192,11 @@
         void loadPage(currentPage + 1);
       }
     });
+    retry.addEventListener("click", () => {
+      if (!loading) void loadPage(currentPage);
+    });
     controls.append(previous, label, next);
-    wrapper.append(list, controls);
+    wrapper.append(list, controls, retry);
     render();
     return { element: wrapper, loadIfNeeded };
   }
@@ -215,10 +223,14 @@
       channelSummary.append(createElement("span", "channel-entry-count", `${formatNumber(channel.entryCount)} 个时间点`));
       const pager = makeEntryPager(group.id, channel, artistQuery);
       channelBlock.append(channelSummary, pager.element);
+      const loadVisibleEntries = () => {
+        if (details.open && channelBlock.open) pager.loadIfNeeded();
+      };
       channelBlock.addEventListener("toggle", () => {
-        if (channelBlock.open) pager.loadIfNeeded();
+        loadVisibleEntries();
       });
-      if (channelBlock.open) pager.loadIfNeeded();
+      details.addEventListener("toggle", loadVisibleEntries);
+      loadVisibleEntries();
       body.append(channelBlock);
     });
     details.append(summary, body);
@@ -287,7 +299,15 @@
     const hasSearch = Object.values(queries).some((value) => value.trim());
     elements.homeView.hidden = hasSearch;
     elements.resultsView.hidden = !hasSearch;
-    if (hasSearch) await refreshResults(queries);
+    if (hasSearch) {
+      await refreshResults(queries);
+    } else {
+      // Invalidate pending search responses when returning to the home page.
+      state.requestId += 1;
+      state.matches = [];
+      state.total = 0;
+      state.pageCount = 1;
+    }
   }
 
   function showLoadedState() {

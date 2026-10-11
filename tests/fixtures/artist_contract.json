@@ -1,0 +1,35 @@
+{
+  "artists": [
+    {"id": 1, "name": "Kanaria", "title": "KING", "keys": ["kanaria"]},
+    {"id": 2, "name": "After the Rain", "title": "Rain Song", "keys": ["aftertherain"]},
+    {"id": 3, "name": "Andy", "title": "Quiet Sky", "keys": ["andy"]},
+    {"id": 4, "name": "Taylor Swift", "title": "Blue Ocean", "keys": ["taylorswift"]},
+    {"id": 5, "name": "BUMP OF CHICKEN", "title": "Aurora", "keys": ["bumpofchicken"]},
+    {"id": 6, "name": "YOASOBI w/ Ado", "title": "Moon Dance", "keys": ["ado", "yoasobi"]},
+    {"id": 7, "name": "Ado × LiSA", "title": "Ruby", "keys": ["ado", "lisa"]},
+    {"id": 8, "name": "Ado x LiSA", "title": "Crystal", "keys": ["ado", "lisa"]},
+    {"id": 9, "name": "LiSA・Ado", "title": "Emerald", "keys": ["ado", "lisa"]},
+    {"id": 10, "name": "Ado feat. LiSA", "title": "Golden Hour", "keys": ["ado", "lisa"]},
+    {"id": 11, "name": "Ado covered by LiSA", "title": "Diamond", "keys": ["ado", "lisa"]},
+    {"id": 12, "name": "Ado & Eve", "title": "Violet", "keys": ["ado", "eve"]},
+    {"id": 13, "name": "Wanda", "title": "Scarlet", "keys": ["wanda"]},
+    {"id": 14, "name": "", "title": "Unknown Light", "keys": []}
+  ],
+  "queries": [
+    {"artist": "Kanaria", "ids": [1]},
+    {"artist": "After the Rain", "ids": [2]},
+    {"artist": "AfterTheRain", "ids": [2]},
+    {"artist": "Andy", "ids": [3]},
+    {"artist": "Taylor Swift", "ids": [4]},
+    {"artist": "Swift", "ids": [4]},
+    {"artist": "BUMP OF CHICKEN", "ids": [5]},
+    {"artist": "BUMP", "ids": []},
+    {"artist": "Rain", "ids": []},
+    {"artist": "Ado", "ids": [6, 7, 8, 9, 10, 11, 12]},
+    {"artist": "LiSA", "ids": [7, 8, 9, 10, 11]},
+    {"artist": "YOASOBI", "ids": [6]},
+    {"artist": "Eve", "ids": [12]},
+    {"artist": "Wanda", "ids": [13]},
+    {"artist": "ZZZZZ", "ids": []}
+  ]
+}

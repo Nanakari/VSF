@@ -41,6 +41,34 @@ def dataset(prefix: str) -> dict[str, list[dict[str, object]]]:
 
 
 class SiteSyncTests(unittest.TestCase):
+    def test_patch_conflict_falls_back_but_server_failure_preserves_baseline(self):
+        for status_code in (409, 500):
+            with self.subTest(status_code=status_code), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "seed"
+                baseline = site_sync._baseline_dir(output, "https://site.test")
+                rows = dataset("1")
+                write_snapshot(baseline, "v1", rows)
+                mark_complete(baseline)
+                rows["channels"][0]["channel_title"] = "Renamed"
+
+                def export(_db, target, on_message=None):
+                    return write_snapshot(target, "v2", rows)
+
+                failure = site_sync.SiteSyncHTTPError("https://site.test/api/admin/patch/commit", status_code, "failed")
+                with patch.object(site_sync, "export_d1_seed", side_effect=export), patch.object(
+                    site_sync, "import_incremental", side_effect=failure
+                ), patch.object(site_sync, "import_snapshot") as full:
+                    if status_code == 409:
+                        result = site_sync.sync_database_to_site("unused", "https://site.test", "secret", output)
+                        self.assertEqual(result["sync_mode"], "full")
+                        full.assert_called_once()
+                    else:
+                        with self.assertRaises(site_sync.SiteSyncHTTPError):
+                            site_sync.sync_database_to_site("unused", "https://site.test", "secret", output)
+                        full.assert_not_called()
+                manifest, _ = site_sync._read_snapshot(baseline, require_complete=True)
+                self.assertEqual(manifest["version"], "v2" if status_code == 409 else "v1")
+
     def test_snapshot_diff_reports_changed_rows_and_deletes(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

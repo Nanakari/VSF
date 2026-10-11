@@ -137,7 +137,10 @@ class YouTubeClient:
     def get_channel(self, channel: str) -> ChannelInfo:
         original_channel = channel.strip()
         channel = normalize_channel_input(original_channel)
-        if original_channel.lower().startswith(("http://", "https://")) and not channel.startswith("UC"):
+        if (
+            original_channel.lower().startswith(("http://", "https://"))
+            and not channel.startswith(("UC", "@"))
+        ):
             channel_id = self._extract_channel_id_from_channel_page(original_channel)
             if channel_id:
                 return self._get_channel_by_id(channel_id)
@@ -153,6 +156,8 @@ class YouTubeClient:
         for handle in handle_candidates:
             try:
                 return self._get_channel_by_handle(handle)
+            except QuotaExceededError:
+                raise
             except YouTubeAPIError as exc:
                 last_error = exc
 

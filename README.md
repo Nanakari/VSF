@@ -4,6 +4,8 @@
 
 根据 YouTube VTuber 歌回、直播回放评论区中粉丝整理的时间轴，建立本地“歌曲名 - 视频 - 时间点”SQLite 检索库。
 
+功能边界与验收规则见 [功能契约](docs/features.md)，模块职责、事务和构建流程见 [工程架构](docs/architecture.md)。
+
 示例可解析的评论行：
 
 ```text
@@ -100,6 +102,10 @@ SITE_SEED_TOKEN=your_site_seed_token_here
 
 `SITE_BASE_URL` 和 `SITE_SEED_TOKEN` 由本地设置工具和命令行索引命令用于索引成功或删除频道后的站点同步。配置后，系统会优先比较上次已同步的基线并上传行级增量；首次同步、变更量过大、基线失配或增量接口不可用时自动回退到完整快照。未配置时仍可只更新本地。`SITE_SEED_TOKEN` 必须与站点 Worker 的 `SEED_TOKEN` 保持一致；令牌只保存在本地 `.env`，不会写入网页或日志。
 
+设置页可以添加频道，也可通过频道卡片执行“增量更新”“历史回填”或“删除频道”。同一频道按 YouTube ID 去重，重复添加会继续更新；回填沿用历史进度。删除仍需输入完整频道名称，未配置站点时只删除本地数据。索引或删除后若同步失败，本地结果保留；修正配置后点击“立即同步站点”即可，不必重新索引，也不需要 YouTube Key。
+
+频道卡片的搜索链接使用频道 ID，避免重名混入其他频道；手工输入名称仍支持模糊搜索。线上时间点只在展开歌曲与频道后加载，失败时可以直接重试。相同视频元数据和歌单不会重建记录 ID 或产生无意义的同步变更。
+
 ## 命令行使用
 
 索引单个视频：
@@ -127,6 +133,8 @@ python main.py update-channel --channel "@Shairu_Vsinger" --max-videos 1000
 ```
 
 增量扫描会持久化本轮开始时的发布时间边界，只有扫描到旧边界或上传列表末尾才结束本轮。达到 `--max-videos` 或中途退出后，再次运行会继续检查该窗口；已完成的视频不占用本轮待处理数量，因此连续小批量运行也能补齐窗口内的视频。升级前已经漏过的视频需要运行 `backfill-channel` 补齐，旧版本没有保存可恢复的增量边界。
+
+已知且仍不符合歌回标题条件的视频也不重复占用批次额度；标题变化或启用 `--include-all-videos` 后会重新检查。新发现的非歌回视频首次仍计入发现额度。失败重试/定期复查队列使用独立额度，`--max-videos` 不是整次任务的 API 请求数量上限。
 
 无论频道是否已经存在于本地，输入频道都会重新查询 YouTube 上传列表；已存在频道按本地最新发布时间继续增量更新，已完成视频不会重复抓取评论。增量更新会把失败重试、近期回扫和新出现的粉丝歌单检查分开处理：失败请求第一次可立即重试，连续失败会使用最长 1 小时的指数退避；最近 30 天内暂时没有时间轴的视频默认每天复查一次。可按频道更新频率调整近期回扫窗口：
 
@@ -234,6 +242,8 @@ python -m unittest discover -s tests -p "test_search*.py" -v
 npm test
 ```
 
+作者姓名和合作标记另由 [artist_contract.json](tests/fixtures/artist_contract.json) 验证；Worker 测试使用真实 Python 快照导出，同时检查歌曲搜索和时间点接口。姓名中的空格不会拆开作者，`ft` / `and` 等标记也不会匹配姓名内部的片段。
+
 可用独立脚本运行搜索分组基准。脚本会在 SQLite 内存数据库中生成固定数据，分别比较索引实现和保留旧全局插入顺序的 reference 实现；`collision_probe` 或任一查询的结果指纹不一致时以非零状态退出：
 
 ```powershell
@@ -276,7 +286,7 @@ logs/app.log
 - 输入频道 URL、handle 或 channel ID。
 - 频道管理列表中的“增量更新”按钮会直接按该频道本地最新发布时间继续更新，无需再次粘贴频道 ID。
 - 点击“开始索引”，索引结果会写入同目录的 `vtuber_songs.sqlite3`；如果已配置站点地址和同步令牌，索引完成后会优先计算并提交增量变更，必要时再通过站点的原子切换流程同步完整快照。
-- 设置站点地址和同步令牌后，可在页面的“本地频道管理”中删除频道。删除前必须输入完整频道名称确认；本地数据会在一个事务中级联清理，随后优先提交增量变更，必要时同步完整快照。同步失败时线上仍保留旧数据，本地页面会显示失败原因。
+- “本地频道管理”支持名称确认后删除频道，不要求配置站点。本地数据与扫描进度会在一个事务中清理；配置完整时随后同步站点。同步失败保留本地删除结果并显示原因，可点击“立即同步站点”重试。
 - 完成后再打开 `VTuberSongFinder.exe` 搜索。
 
 设置工具提交索引前会先校验频道和索引模式，再在任务锁内检查是否已有任务；校验失败或任务冲突时不会写入 `.env` 或修改运行中的 API Key。保存 Key 失败会返回错误且不会留下“正在运行”的任务状态；并发提交时只有一个请求能够保存 Key 并启动索引。
@@ -298,7 +308,9 @@ vtuber_song_finder/
 ├── requirements.txt
 ├── .env.example
 ├── app.py
+├── indexer_app.py
 ├── main.py
+├── indexing.py
 ├── youtube_client.py
 ├── site_sync.py
 ├── timeline_parser.py
@@ -306,6 +318,9 @@ vtuber_song_finder/
 ├── search.py
 ├── song_identity.py
 ├── config.py
+├── docs/
+│   ├── architecture.md
+│   └── features.md
 ├── db/
 │   └── schema.ts
 ├── drizzle/
@@ -318,10 +333,20 @@ vtuber_song_finder/
 │   └── stop.ps1
 ├── site/
 ├── worker/
+│   ├── index.js
+│   ├── http.js
+│   ├── search.js
+│   └── sync.js
 ├── scripts/
-    ├── build-worker.mjs
-    ├── export_d1_seed.py
-    └── validate-worker.mjs
+│   ├── check.py
+│   ├── build-worker.mjs
+│   ├── worker-build.mjs
+│   ├── export_d1_seed.py
+│   └── validate-worker.mjs
+├── tests/
+│   ├── fixtures/
+│   └── helpers/
+├── dist/                  # 生成的部署文件，不直接编辑
 ├── templates/
 │   └── index.html
 └── static/
@@ -334,15 +359,13 @@ vtuber_song_finder/
 
 ```powershell
 python -m pip install -r requirements.txt
-python -m pip check
-python -m compileall -q .
-python -c "import app, config, database, indexer_app, main, search, song_identity, timeline_parser, youtube_client"
-python -m unittest discover -s tests -p "test_*.py" -v
 npm ci
-npm run build
-npm run validate
-npm test
+python scripts/check.py
 ```
+
+建议使用项目虚拟环境。统一检查支持 `--scope python` / `--scope site`，网站单独检查也可运行 `npm run check`。网站测试需要可用的 Python 及项目依赖；统一入口会自动选择当前解释器，直接使用 npm 时可用 `PYTHON` 环境变量指定它。测试使用临时数据库，不访问 YouTube 或线上站点。
+
+Worker 通过 esbuild 打包为单文件，`npm run validate` 检查源码与部署文件、嵌入资源、迁移副本是否一致。`dist/` 沿用版本控制约定，修改源码后应重新构建。表结构修改另需运行 `npm run db:generate`。
 
 贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md)，敏感信息和漏洞报告方式见
 [SECURITY.md](SECURITY.md)，版本记录见 [CHANGELOG.md](CHANGELOG.md)。

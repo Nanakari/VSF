@@ -201,6 +201,11 @@ class SongDatabase:
                 url = excluded.url,
                 duration_seconds = COALESCE(excluded.duration_seconds, videos.duration_seconds),
                 indexed_at = CURRENT_TIMESTAMP
+            WHERE videos.channel_id IS NOT excluded.channel_id
+               OR videos.title IS NOT excluded.title
+               OR videos.published_at IS NOT excluded.published_at
+               OR videos.url IS NOT excluded.url
+               OR videos.duration_seconds IS NOT COALESCE(excluded.duration_seconds, videos.duration_seconds)
             """,
             (
                 video_id,
@@ -362,6 +367,7 @@ class SongDatabase:
         limit: int,
         recent_rescan_days: int = 0,
         recent_after_days: int | None = None,
+        include_filtered: bool = False,
     ) -> list[sqlite3.Row]:
         no_timeline_conditions = [
             "videos.last_index_attempt_at IS NULL",
@@ -406,7 +412,7 @@ class SongDatabase:
             WHERE videos.channel_id = ?
               AND (
                     (
-                        videos.index_status IN ('retry', 'indexing')
+                        videos.index_status IN ('discovered', 'retry', 'indexing')
                         AND (
                             videos.next_retry_at IS NULL
                             OR videos.next_retry_at <= CURRENT_TIMESTAMP
@@ -420,6 +426,7 @@ class SongDatabase:
                         videos.index_status = 'comments_disabled'
                         AND ({" OR ".join(comments_disabled_conditions)})
                     )
+                    OR (videos.index_status = 'filtered' AND ?)
               )
             ORDER BY
                 CASE WHEN videos.index_status IN ('retry', 'indexing') THEN 0 ELSE 1 END,
@@ -427,7 +434,7 @@ class SongDatabase:
                 videos.video_id
             LIMIT ?
             """,
-            (*params, max(1, int(limit))),
+            (*params, include_filtered, max(1, int(limit))),
         ).fetchall()
         return list(rows)
 
@@ -468,9 +475,10 @@ class SongDatabase:
     def mark_backfill_complete(self, channel_id: str) -> None:
         self.conn.execute(
             """
-            UPDATE channel_index_state
-            SET backfill_complete = 1, updated_at = CURRENT_TIMESTAMP
-            WHERE channel_id = ?
+            INSERT INTO channel_index_state (channel_id, backfill_complete)
+            VALUES (?, 1)
+            ON CONFLICT(channel_id) DO UPDATE SET
+                backfill_complete = 1, updated_at = CURRENT_TIMESTAMP
             """,
             (channel_id,),
         )
@@ -545,6 +553,7 @@ class SongDatabase:
         video_id: str,
         entries: Iterable[TimelineEntry],
         source_comment: str,
+        replace_existing: bool = False,
     ) -> int:
         channel_id = self._get_video_channel_id(video_id)
         inserted = 0
@@ -581,16 +590,34 @@ class SongDatabase:
             )
             inserted += cursor.rowcount
             if cursor.rowcount == 0:
-                self.conn.execute(
-                    """
-                    UPDATE song_entries
-                    SET song_id = COALESCE(song_id, ?)
-                    WHERE video_id = ?
-                        AND seconds = ?
-                        AND normalized_song_title = ?
-                    """,
-                    (song_id, video_id, entry.seconds, entry.normalized_song_title),
-                )
+                if replace_existing:
+                    self.conn.execute(
+                        """
+                        UPDATE song_entries
+                        SET song_id = ?, timestamp_text = ?, raw_song_title = ?,
+                            source_comment = ?, jump_url = ?
+                        WHERE video_id = ? AND seconds = ? AND normalized_song_title = ?
+                          AND (song_id IS NOT ? OR timestamp_text IS NOT ?
+                               OR raw_song_title IS NOT ? OR source_comment IS NOT ?
+                               OR jump_url IS NOT ?)
+                        """,
+                        (song_id, entry.timestamp_text, entry.raw_song_title,
+                         source_comment, make_jump_url(video_id, entry.seconds),
+                         video_id, entry.seconds, entry.normalized_song_title,
+                         song_id, entry.timestamp_text, entry.raw_song_title,
+                         source_comment, make_jump_url(video_id, entry.seconds)),
+                    )
+                else:
+                    self.conn.execute(
+                        """
+                        UPDATE song_entries
+                        SET song_id = COALESCE(song_id, ?)
+                        WHERE video_id = ?
+                            AND seconds = ?
+                            AND normalized_song_title = ?
+                        """,
+                        (song_id, video_id, entry.seconds, entry.normalized_song_title),
+                    )
         return inserted
 
     def replace_song_entries_for_video(
@@ -599,12 +626,24 @@ class SongDatabase:
         entries: Iterable[TimelineEntry],
         source_comment: str,
     ) -> int:
-        # Keep deletion, orphan cleanup, and insertion in one transaction. If
-        # parsing or an INSERT fails, the previous timeline remains intact.
+        # Reconcile by the existing uniqueness key. Rechecking the same timeline
+        # must preserve entry/song IDs so a no-op does not become a large patch.
+        # A changed comment still refreshes retained rows, in the same transaction.
         with self.conn:
-            self.conn.execute("DELETE FROM song_entries WHERE video_id = ?", (video_id,))
+            entries = list(entries)
+            keys = {(entry.seconds, entry.normalized_song_title) for entry in entries}
+            old_rows = self.conn.execute(
+                "SELECT id, seconds, normalized_song_title FROM song_entries WHERE video_id = ?",
+                (video_id,),
+            ).fetchall()
+            self.conn.executemany(
+                "DELETE FROM song_entries WHERE id = ?",
+                [(row["id"],) for row in old_rows
+                 if (row["seconds"], row["normalized_song_title"]) not in keys],
+            )
+            inserted = self._insert_song_entries(video_id, entries, source_comment, replace_existing=True)
             self._delete_orphan_songs()
-            return self._insert_song_entries(video_id, entries, source_comment)
+            return inserted
 
     def rebuild_best_timeline_comments(self) -> dict[str, int]:
         rows = self.conn.execute(
@@ -803,11 +842,12 @@ class SongDatabase:
         # Keep song-name filtering in group_matches_query so compact, fuzzy,
         # and version-variant titles remain available for grouping.
         if channel_query:
-            channel_like = f"%{escape_like(channel_query)}%"
-            where_clauses.append(
-                "(channels.channel_title LIKE ? ESCAPE '\\' OR channels.channel_id = ?)"
-            )
-            params.extend((channel_like, channel_query))
+            if self.get_channel(channel_query) is not None:
+                where_clauses.append("channels.channel_id = ?")
+                params.append(channel_query)
+            else:
+                where_clauses.append("channels.channel_title LIKE ? ESCAPE '\\'")
+                params.append(f"%{escape_like(channel_query)}%")
         if artist_query:
             artist_key_query = compact_key(artist_query)
             if artist_key_query:
@@ -1216,44 +1256,34 @@ class SongDatabase:
             (channel_id,),
         ).fetchone()
 
-    def delete_channel(self, channel_id: str) -> dict[str, object] | None:
+    def delete_channel(
+        self, channel_id: str, *, expected_title: str | None = None,
+    ) -> dict[str, object] | None:
         """Delete one channel and all of its dependent local data atomically."""
-        channel = self.get_channel(channel_id)
-        if channel is None:
-            return None
-
-        video_count = int(
-            self.conn.execute(
-                "SELECT COUNT(*) AS count FROM videos WHERE channel_id = ?",
-                (channel_id,),
-            ).fetchone()["count"]
-        )
-        song_count = int(
-            self.conn.execute(
-                "SELECT COUNT(*) AS count FROM songs WHERE channel_id = ?",
-                (channel_id,),
-            ).fetchone()["count"]
-        )
-        entry_count = int(
-            self.conn.execute(
-                """
-                SELECT COUNT(*) AS count
-                FROM song_entries
-                WHERE video_id IN (
-                    SELECT video_id FROM videos WHERE channel_id = ?
-                )
-                OR song_id IN (
-                    SELECT id FROM songs WHERE channel_id = ?
-                )
-                """,
-                (channel_id, channel_id),
-            ).fetchone()["count"]
-        )
-
-        # Foreign keys intentionally do not use ON DELETE CASCADE in the
-        # schema. Delete children explicitly in dependency order so this
-        # operation remains safe and rolls back as one unit on any error.
         with self.conn:
+            # Reserve the write transaction before checking the confirmation or
+            # counting rows, including when a CLI process is using this database.
+            if not self.conn.in_transaction:
+                self.conn.execute("BEGIN IMMEDIATE")
+            channel = self.get_channel(channel_id)
+            if channel is None:
+                return None
+            if expected_title is not None and channel["channel_title"] != expected_title:
+                raise ValueError("频道名称已变化，请刷新页面后重新确认删除。")
+            video_count = self.conn.execute(
+                "SELECT COUNT(*) FROM videos WHERE channel_id = ?", (channel_id,),
+            ).fetchone()[0]
+            song_count = self.conn.execute(
+                "SELECT COUNT(*) FROM songs WHERE channel_id = ?", (channel_id,),
+            ).fetchone()[0]
+            entry_count = self.conn.execute(
+                """
+                SELECT COUNT(*) FROM song_entries
+                WHERE video_id IN (SELECT video_id FROM videos WHERE channel_id = ?)
+                   OR song_id IN (SELECT id FROM songs WHERE channel_id = ?)
+                """, (channel_id, channel_id),
+            ).fetchone()[0]
+            # Delete children explicitly; every step rolls back on failure.
             self.conn.execute(
                 """
                 DELETE FROM song_entries
@@ -1270,6 +1300,10 @@ class SongDatabase:
             self.conn.execute("DELETE FROM videos WHERE channel_id = ?", (channel_id,))
             self.conn.execute(
                 "DELETE FROM channel_index_state WHERE channel_id = ?",
+                (channel_id,),
+            )
+            self.conn.execute(
+                "DELETE FROM channel_incremental_state WHERE channel_id = ?",
                 (channel_id,),
             )
             self.conn.execute("DELETE FROM channels WHERE channel_id = ?", (channel_id,))

@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 from database import SongDatabase
 import main
-from main import index_video, run_index_channel
+from indexing import index_video, run_index_channel
 from youtube_client import ChannelInfo, CommentInfo, VideoInfo, YouTubeAPIError
 
 
@@ -67,6 +67,55 @@ def video(video_id, published_at, title=None):
 
 
 class IndexingTests(unittest.TestCase):
+    def test_filtered_uploads_do_not_block_capped_incremental_restarts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "songs.db"
+            client = FakeClient([
+                video("chat", "2026-01-04", "Just chatting"),
+                video("game", "2026-01-03", "Gaming"),
+                video("song", "2026-01-02", "karaoke"),
+            ])
+            for _ in range(3):
+                db = SongDatabase(path)
+                try:
+                    db.init_schema()
+                    run_index_channel(db, client, "channel", 1, 20, False,
+                                      incremental=True, on_message=lambda _: None)
+                finally:
+                    db.close()
+
+            db = SongDatabase(path)
+            try:
+                state = db.get_video_index_state("song")
+                self.assertIsNotNone(state, "the scan must reach the song after filtered uploads")
+                self.assertEqual(state["index_status"], "indexed")
+                self.assertEqual(db.conn.execute("SELECT COUNT(*) FROM channel_incremental_state").fetchone()[0], 0)
+                self.assertEqual(client.comment_attempts, 1)
+            finally:
+                db.close()
+
+    def test_filtered_upload_with_changed_title_consumes_incremental_budget(self):
+        db = SongDatabase(":memory:")
+        self.addCleanup(db.close)
+        db.init_schema()
+        client = FakeClient([
+            video("renamed", "2026-01-03", "Just chatting"),
+            video("older", "2026-01-02", "karaoke"),
+        ])
+        run_index_channel(db, client, "channel", 1, 20, False,
+                          incremental=True, on_message=lambda _: None)
+        client.uploads[0] = video("renamed", "2026-01-03", "karaoke")
+        run_index_channel(db, client, "channel", 1, 20, False,
+                          incremental=True, on_message=lambda _: None)
+        self.assertEqual(db.get_video_index_state("renamed")["index_status"], "indexed")
+        self.assertIsNone(db.get_video_index_state("older"))
+        self.assertEqual(client.comment_attempts, 1)
+
+        run_index_channel(db, client, "channel", 1, 20, False,
+                          incremental=True, on_message=lambda _: None)
+        self.assertEqual(db.get_video_index_state("older")["index_status"], "indexed")
+        self.assertEqual(client.comment_attempts, 2)
+
     def test_capped_incremental_scan_resumes_across_restarts(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "songs.db"
@@ -173,7 +222,8 @@ class IndexingTests(unittest.TestCase):
 
         third = run_index_channel(db, client, "channel", 10, 20, False, incremental=True)
         self.assertEqual(third.videos_skipped, 1)
-        self.assertEqual(db.get_video_index_state("filtered")["index_status"], "filtered")
+        self.assertEqual(db.get_video_index_state("filtered")["index_status"], "indexed")
+        run_index_channel(db, client, "channel", 10, 20, True, incremental=True)
         self.assertEqual(client.comment_attempts, 1)
         db.close()
 

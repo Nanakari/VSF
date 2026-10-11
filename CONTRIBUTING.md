@@ -12,26 +12,29 @@ Never commit API keys, local databases, logs, or packaged executables.
 ## Repository layout
 
 - Python application entry points are kept at the repository root because the portable build and command-line tools import them directly.
+- Shared indexing belongs in `indexing.py`; CLI and Flask entry points call that service. New code must not import business logic from `main.py`.
+- `worker/index.js` handles routing, `worker/search.js` handles reads, `worker/sync.js` handles authenticated writes, and `worker/http.js` holds HTTP helpers.
 - `site/`, `worker/`, `db/`, `drizzle/`, and `dist/` contain the hosted site source, Worker, schema, migrations, and deployable Worker output.
 - `packaging/` contains portable-build specs and launcher documentation. Generated executables belong under ignored `build/portable/`.
 - `tests/` contains Python and Worker regression coverage; test fixtures must not contain API keys or personal databases.
+- Setup interactions live in `static/setup.js`; templates supply route configuration through data attributes. Frontend request/state regressions run with the Node tests, without a browser or a live service.
+- Module boundaries and transaction rules are documented in [docs/architecture.md](docs/architecture.md); supported behavior is in [docs/features.md](docs/features.md).
 
 ## Checks
 
 Run these checks before opening a pull request:
 
 ```powershell
-python -m pip check
-python -m compileall -q .
-python -c "import app, config, database, indexer_app, main, search, song_identity, timeline_parser, youtube_client"
-python -m unittest discover -s tests -p "test_*.py" -v
 npm ci
 npm run db:generate
-npm run build
-npm run validate
-npm test
-git diff --check
+python scripts/check.py
 ```
+
+Use `--scope python` or `--scope site` for focused checks. `npm run check` also builds, validates, and tests the site. Worker integration tests need Python with `requirements.txt` installed; the unified checker selects its own Python interpreter, while direct npm commands honor the `PYTHON` environment variable.
+
+The checker compiles maintained sources, imports the applications, runs regression tests, builds and verifies the Worker, and checks whitespace. Tests use temporary data and never index a real channel or synchronize a live site. CI runs the same commands and verifies migrations and generated `dist/` are current. `dist/` remains versioned for deployment; rebuild and include it when source changes, without editing it directly.
+
+For bug fixes, first demonstrate a failing behavioral regression. Indexing tests should cross a batch or restart boundary. Sync tests must cover rollback as well as success. Worker database tests use the production migrations through `tests/helpers/worker_db.mjs`. Search changes must cover both runtimes using shared fixtures; artist integration tests feed real Python exports into Worker APIs.
 
 Keep parser and database changes backward compatible with existing SQLite data when possible, and document migrations or re-indexing requirements.
 

@@ -80,7 +80,7 @@
       {% if not has_search %}
         <section class="channel-grid" aria-label="频道列表">
           {% for channel in channels %}
-            <a class="channel-card" href="{{ url_for('index', channel=channel.channel_title) }}">
+            <a class="channel-card" href="{{ url_for('index', channel=channel.channel_id) }}">
               <strong>{{ channel.channel_title }}</strong>
               <span>{{ channel.song_count }} 首歌曲</span>
             </a>

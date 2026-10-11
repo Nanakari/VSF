@@ -8,7 +8,15 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
   </head>
   <body>
-    <main class="shell">
+    <main class="shell" id="setup-root"
+      data-save-config-url="{{ url_for('save_site_config') }}"
+      data-sync-url="{{ url_for('start_site_sync') }}"
+      data-status-url="{{ url_for('status') }}"
+      data-shutdown-url="{{ url_for('shutdown') }}"
+      data-close-url="{{ url_for('shutdown_close') }}"
+      data-ping-url="{{ url_for('client_ping') }}"
+      data-client-close-url="{{ url_for('client_close') }}"
+      data-auto-exit="{{ 'true' if auto_exit_enabled else 'false' }}">
       <header class="topbar">
         <div>
           <h1>VTuber Song Finder Setup</h1>
@@ -36,6 +44,7 @@
         </div>
         <div class="setup-actions">
           <button id="save-site-config" class="secondary-button" type="button">保存站点同步设置</button>
+          <button id="sync-site-button" class="secondary-button" type="button">立即同步站点</button>
           <span class="subtle">配置后，索引成功或删除频道都会自动同步站点数据（优先增量，必要时完整快照）；未配置时仍可只更新本地。</span>
         </div>
         <label>
@@ -75,14 +84,14 @@
           </label>
         </div>
         <p class="subtle">默认增量更新会从数据库最新发布时间之后继续抓取；频道管理中的“增量更新”按钮也使用此模式。失败和近期暂时没有粉丝歌单的视频仍会按规则复查；填 0 可关闭近期回扫。</p>
-        <button id="start-button" type="submit">开始索引</button>
+        <button id="start-button" type="submit">添加 / 更新频道</button>
       </form>
 
       <section class="channel-management" aria-labelledby="channel-management-title">
         <div class="section-heading">
           <div>
             <h2 id="channel-management-title">本地频道管理</h2>
-            <p class="subtle">可直接对已有频道执行增量更新；删除会同时清理本地数据并同步站点。</p>
+            <p class="subtle">增量更新检查新上传；历史回填继续扫描旧视频。删除会清理本地数据；配置了站点时自动同步，失败后可单独重试同步。</p>
           </div>
         </div>
         {% if channels %}
@@ -100,6 +109,13 @@
                     data-channel-id="{{ channel.channel_id }}"
                     data-channel-title="{{ channel.channel_title }}"
                   >增量更新</button>
+                  <button
+                    class="secondary-button update-channel-button"
+                    type="button"
+                    data-mode="backfill"
+                    data-channel-id="{{ channel.channel_id }}"
+                    data-channel-title="{{ channel.channel_title }}"
+                  >历史回填</button>
                   <button
                     class="danger-button delete-channel-button"
                     type="button"
@@ -122,7 +138,7 @@
         <form id="delete-confirm-form" method="post" action="{{ url_for('delete_channel') }}">
           <h2>确认删除频道</h2>
           <p id="delete-dialog-summary" class="subtle"></p>
-          <p>请输入完整频道名称后继续。删除和站点同步开始后不能从界面撤销。</p>
+          <p>请输入完整频道名称后继续。删除后不能从界面撤销；已配置站点时会自动同步。</p>
           <input id="delete-channel-id" name="channel_id" type="hidden">
           <label>
             <span>频道名称</span>
@@ -130,7 +146,7 @@
           </label>
           <div class="dialog-actions">
             <button id="cancel-delete" class="secondary-button" type="button">取消</button>
-            <button class="danger-button" type="submit">确认删除并同步</button>
+            <button id="confirm-delete-button" class="danger-button" type="submit">确认删除</button>
           </div>
         </form>
       </dialog>
@@ -152,241 +168,7 @@
       </section>
     </main>
 
-    <script>
-      (() => {
-        const form = document.querySelector("#index-form");
-        const button = document.querySelector("#start-button");
-        const saveSiteConfigButton = document.querySelector("#save-site-config");
-        const exitButton = document.querySelector("#exit-button");
-        const updateChannelButtons = document.querySelectorAll(".update-channel-button");
-        const deleteChannelButtons = document.querySelectorAll(".delete-channel-button");
-        const message = document.querySelector("#status-message");
-        const log = document.querySelector("#job-log");
-        const deleteDialog = document.querySelector("#delete-dialog");
-        const deleteConfirmForm = document.querySelector("#delete-confirm-form");
-        const deleteChannelId = document.querySelector("#delete-channel-id");
-        const deleteConfirmation = document.querySelector("#delete-confirmation");
-        const deleteDialogSummary = document.querySelector("#delete-dialog-summary");
-        const cancelDelete = document.querySelector("#cancel-delete");
-        let deleteChannelTitle = "";
-        let formError = "";
-        let reloadAfterDelete = false;
-        let reloadAfterIndex = false;
-        const statMap = {
-          videos_seen: document.querySelector("#videos-seen"),
-          videos_indexed: document.querySelector("#videos-indexed"),
-          videos_skipped: document.querySelector("#videos-skipped"),
-          videos_failed: document.querySelector("#videos-failed"),
-          comments_seen: document.querySelector("#comments-seen"),
-          timeline_comments: document.querySelector("#timeline-comments"),
-          entries_inserted: document.querySelector("#entries-inserted")
-        };
+    <script src="{{ url_for('static', filename='setup.js') }}" defer></script>
 
-        const setIndexControlsDisabled = (disabled) => {
-          button.disabled = disabled;
-          saveSiteConfigButton.disabled = disabled;
-          deleteChannelButtons.forEach((deleteButton) => {
-            deleteButton.disabled = disabled;
-          });
-          updateChannelButtons.forEach((updateButton) => {
-            updateButton.disabled = disabled;
-          });
-        };
-
-        const startIndexTask = async (payload, pendingMessage) => {
-          formError = "";
-          setIndexControlsDisabled(true);
-          message.textContent = pendingMessage;
-          try {
-            const response = await fetch(form.action, {
-              method: "POST",
-              body: payload
-            });
-            const data = await response.json().catch(() => ({}));
-            if (!response.ok) {
-              formError = data.message || "启动失败。";
-              setIndexControlsDisabled(false);
-              message.textContent = formError;
-              return;
-            }
-            message.textContent = data.message || "索引任务已开始。";
-            reloadAfterIndex = true;
-          } catch (_) {
-            formError = "无法连接更新服务，请重新打开更新页面。";
-            setIndexControlsDisabled(false);
-            message.textContent = formError;
-          }
-        };
-
-        form.addEventListener("submit", (event) => {
-          event.preventDefault();
-          void startIndexTask(new FormData(form), "正在启动索引任务...");
-        });
-
-        updateChannelButtons.forEach((updateButton) => {
-          updateButton.addEventListener("click", () => {
-            const channelId = updateButton.dataset.channelId || "";
-            const channelTitle = updateButton.dataset.channelTitle || channelId;
-            const payload = new FormData(form);
-            payload.set("channel", channelId);
-            payload.set("mode", "incremental");
-            payload.delete("reset_backfill");
-            void startIndexTask(
-              payload,
-              `正在对“${channelTitle}”执行增量更新...`
-            );
-          });
-        });
-
-        saveSiteConfigButton.addEventListener("click", async () => {
-          saveSiteConfigButton.disabled = true;
-          message.textContent = "正在保存站点同步设置...";
-          try {
-            const response = await fetch("{{ url_for('save_site_config') }}", {
-              method: "POST",
-              body: new FormData(form)
-            });
-            const data = await response.json().catch(() => ({}));
-            message.textContent = data.message || (response.ok ? "站点同步设置已保存。" : "保存失败。");
-          } catch (_) {
-            message.textContent = "无法连接更新服务，设置未保存。";
-          } finally {
-            saveSiteConfigButton.disabled = false;
-          }
-        });
-
-        deleteChannelButtons.forEach((deleteButton) => {
-          deleteButton.addEventListener("click", () => {
-            deleteChannelTitle = deleteButton.dataset.channelTitle || "";
-            deleteChannelId.value = deleteButton.dataset.channelId || "";
-            deleteConfirmation.value = "";
-            deleteDialogSummary.textContent = `将删除“${deleteChannelTitle}”及其 ${deleteButton.dataset.channelVideoCount || 0} 个视频、${deleteButton.dataset.channelSongCount || 0} 首歌曲和 ${deleteButton.dataset.channelEntryCount || 0} 个时间点。`;
-            deleteDialog.showModal();
-            deleteConfirmation.focus();
-          });
-        });
-
-        cancelDelete.addEventListener("click", () => deleteDialog.close());
-
-        deleteConfirmForm.addEventListener("submit", async (event) => {
-          event.preventDefault();
-          if (deleteConfirmation.value !== deleteChannelTitle) {
-            message.textContent = "频道名称不匹配，未执行删除。";
-            deleteConfirmation.focus();
-            return;
-          }
-          const submitButton = deleteConfirmForm.querySelector("button[type='submit']");
-          submitButton.disabled = true;
-          message.textContent = "正在删除频道并同步站点...";
-          try {
-            const deleteData = new FormData(deleteConfirmForm);
-            // Allow a freshly entered site configuration to be used even if
-            // the user did not click the separate save button first.
-            deleteData.append("site_base_url", form.elements.site_base_url.value);
-            deleteData.append("site_seed_token", form.elements.site_seed_token.value);
-            const response = await fetch(deleteConfirmForm.action, {
-              method: "POST",
-              body: deleteData
-            });
-            const data = await response.json().catch(() => ({}));
-            if (!response.ok) {
-              message.textContent = data.message || "删除任务启动失败。";
-              submitButton.disabled = false;
-              return;
-            }
-            deleteDialog.close();
-            reloadAfterDelete = true;
-            message.textContent = data.message || "删除任务已开始。";
-          } catch (_) {
-            message.textContent = "无法连接更新服务，未确认删除任务状态。";
-            submitButton.disabled = false;
-          }
-        });
-
-        exitButton.addEventListener("click", async () => {
-          exitButton.disabled = true;
-          message.textContent = "正在退出...";
-          const shutdownUrl = "{{ url_for('shutdown') }}";
-          const closeUrl = "{{ url_for('shutdown_close') }}";
-          try {
-            const response = await fetch(shutdownUrl, { method: "POST" });
-            const data = await response.json().catch(() => ({}));
-            if (!response.ok) {
-              message.textContent = data.message || "索引任务正在运行，暂时不能退出。";
-              exitButton.disabled = false;
-              return;
-            }
-          } catch (_) {
-            message.textContent = "无法确认索引服务状态，请不要关闭窗口，稍后重试。";
-            exitButton.disabled = false;
-            return;
-          }
-          window.open("", "_self");
-          window.close();
-          setTimeout(() => { window.location.href = closeUrl; }, 300);
-        });
-        const refreshStatus = async () => {
-          const response = await fetch("{{ url_for('status') }}");
-          const data = await response.json();
-          if (data.operation === "index" && data.running) {
-            reloadAfterIndex = true;
-          }
-          if (!formError) {
-            message.textContent = data.message || "";
-          }
-          const stats = data.stats || {};
-          Object.entries(statMap).forEach(([key, element]) => {
-            element.textContent = String(stats[key] || 0);
-          });
-          log.textContent = (data.log || []).join("\n");
-          log.scrollTop = log.scrollHeight;
-          button.disabled = Boolean(data.running);
-          saveSiteConfigButton.disabled = Boolean(data.running);
-          deleteChannelButtons.forEach((deleteButton) => {
-            deleteButton.disabled = Boolean(data.running);
-          });
-          updateChannelButtons.forEach((updateButton) => {
-            updateButton.disabled = Boolean(data.running);
-          });
-          if (reloadAfterDelete && data.operation === "delete-channel" && data.done && !data.running) {
-            reloadAfterDelete = false;
-            if (data.ok) window.setTimeout(() => window.location.reload(), 1200);
-          }
-          if (reloadAfterIndex && data.operation === "index" && data.done && !data.running) {
-            reloadAfterIndex = false;
-            window.setTimeout(() => window.location.reload(), 1200);
-          }
-        };
-
-        window.setInterval(refreshStatus, 1500);
-        refreshStatus();
-
-        {% if auto_exit_enabled %}
-          const clientId = crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random());
-          const payload = () => JSON.stringify({ client_id: clientId });
-          const post = (url) => {
-            try {
-              navigator.sendBeacon(url, new Blob([payload()], { type: "application/json" }));
-            } catch {
-              fetch(url, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: payload(),
-                keepalive: true
-              }).catch(() => {});
-            }
-          };
-          post("{{ url_for('client_ping') }}");
-          const intervalId = window.setInterval(() => post("{{ url_for('client_ping') }}"), 5000);
-          window.addEventListener("pagehide", (event) => {
-            window.clearInterval(intervalId);
-            if (event.persisted) {
-              return;
-            }
-            post("{{ url_for('client_close') }}");
-          });
-        {% endif %}
-      })();
-    </script>
   </body>
 </html>

@@ -4,6 +4,20 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+- Make channel updates idempotent: preserve video timestamps and retained song/entry IDs, recover older discovered/filtered uploads, and retain progress on quota failure.
+- Resolve handle URLs through the API directly; preserve quota errors and fix empty/undated historical backfill progress.
+- Allow local-only channel deletion, revalidate names inside the delete transaction, and add independent site-sync retries with shared job exclusion.
+- Use stable channel IDs in search links; reuse scoped Worker aggregates and lazily load expanded timelines with retry controls.
+- Extract setup-page behavior into `static/setup.js`, guard against stale status responses, and export all local tables from one read snapshot.
+- Add channel lifecycle, snapshot consistency, Worker query-count, and frontend interaction regressions.
+- Fix capped incremental scans repeatedly spending their budget on filtered uploads; retain title-change and include-all rechecks.
+- Defer patch foreign-key checks until atomic commit so artist promotion/demotion can move retained song and entry references; invalid final references still roll back.
+- Preserve complete artist names and recognize bounded collaboration markers consistently in hosted search and entry filtering.
+- Add shared artist fixtures, real Python-export-to-Worker integration coverage, and migration-backed Worker test databases.
+- Extract indexing orchestration from the CLI and split Worker routing, HTTP helpers, search, and synchronization into modules.
+- Bundle the Worker with a pinned esbuild dependency; verify generated code, assets, hosting configuration, and migrations against source.
+- Add a cross-platform check command, align CI and contributor checks, and document functional contracts and architecture.
+
 ## [0.3.1] - 2026-09-17
 
 - Keep portable build inputs under `packaging/` and generated executables under `build/portable/`.

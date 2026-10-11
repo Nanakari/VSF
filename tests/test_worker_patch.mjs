@@ -2,22 +2,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import worker from "../worker/index.js";
-import { queryRows, SqliteD1 } from "./helpers/sqlite_d1.mjs";
+import { queryRows } from "./helpers/sqlite_d1.mjs";
+import { createMigratedDb } from "./helpers/worker_db.mjs";
+import { exportContract } from "./helpers/export_contract.mjs";
 
 const TABLES = ["channels", "videos", "song_groups", "songs", "song_entries"];
-
-async function createDb() {
-  const db = new SqliteD1();
-  await db.prepare("PRAGMA foreign_keys = ON").run();
-  await db.batch([
-    db.prepare("CREATE TABLE channels (channel_id TEXT PRIMARY KEY NOT NULL, channel_title TEXT NOT NULL)"),
-    db.prepare("CREATE TABLE videos (video_id TEXT PRIMARY KEY NOT NULL, channel_id TEXT NOT NULL, title TEXT NOT NULL, published_at TEXT, url TEXT NOT NULL, indexed_at TEXT NOT NULL, FOREIGN KEY (channel_id) REFERENCES channels(channel_id))"),
-    db.prepare("CREATE TABLE song_groups (group_key TEXT PRIMARY KEY NOT NULL, song_title TEXT NOT NULL, artist TEXT NOT NULL, title_search TEXT NOT NULL, artist_search TEXT NOT NULL, entry_count INTEGER NOT NULL, channel_count INTEGER NOT NULL)"),
-    db.prepare("CREATE TABLE songs (id INTEGER PRIMARY KEY NOT NULL, channel_id TEXT NOT NULL, canonical_song_title TEXT NOT NULL, normalized_song_title TEXT NOT NULL, artist TEXT NOT NULL, group_key TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY (channel_id) REFERENCES channels(channel_id), FOREIGN KEY (group_key) REFERENCES song_groups(group_key))"),
-    db.prepare("CREATE TABLE song_entries (id INTEGER PRIMARY KEY NOT NULL, song_id INTEGER NOT NULL, group_key TEXT NOT NULL, video_id TEXT NOT NULL, timestamp_text TEXT NOT NULL, seconds INTEGER NOT NULL, raw_song_title TEXT NOT NULL, normalized_song_title TEXT NOT NULL, source_comment TEXT NOT NULL, jump_url TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY (song_id) REFERENCES songs(id), FOREIGN KEY (group_key) REFERENCES song_groups(group_key), FOREIGN KEY (video_id) REFERENCES videos(video_id))"),
-  ]);
-  return db;
-}
 
 function dataset(prefix, { invalidEntrySongId = null } = {}) {
   const channelId = `channel-${prefix}`;
@@ -73,8 +62,47 @@ function changeCounts(rows, oldRows) {
   }]));
 }
 
+for (const scenario of ["promotion", "demotion"]) {
+  test(`real exports preserve retained references during artist ${scenario}`, async (t) => {
+    const db = await createMigratedDb();
+    t.after(() => db.close());
+    const env = { DB: db, SEED_TOKEN: "test-token" };
+    const { before, after, diff } = exportContract(scenario);
+    await fullImport(env, before.manifest.version, before.tables);
+    assert.deepEqual(diff.song_groups.deletes, [scenario === "promotion" ? "king::" : "king::kanaria"]);
+    assert.ok(!diff.songs.deletes.includes(1));
+    assert.ok(!diff.song_entries.deletes.includes(1));
+
+    const version = after.manifest.version;
+    const changes = Object.fromEntries(TABLES.map((table) => [table, {
+      upserts: diff[table].upserts.length, deletes: diff[table].deletes.length,
+    }]));
+    assert.equal((await call(env, "/api/admin/patch/start", {
+      version, base_version: before.manifest.version, tables: after.manifest.tables, changes,
+    })).status, 200);
+    for (const table of TABLES) {
+      assert.equal((await call(env, "/api/admin/patch", { version, table, ...diff[table] })).status, 200);
+    }
+    assert.equal((await call(env, "/api/admin/patch/commit", { version })).status, 200);
+    for (const table of TABLES) {
+      const key = table === "channels" ? "channel_id" : table === "videos" ? "video_id"
+        : table === "song_groups" ? "group_key" : "id";
+      // Channel exports also contain overview counts; compare live keys and
+      // compare all fields for the rows whose foreign keys were reassigned.
+      assert.deepEqual((await queryRows(db, `SELECT ${key} FROM ${table} ORDER BY ${key}`)).map((row) => row[key]),
+        after.tables[table].map((row) => row[key]).sort());
+    }
+    assert.deepEqual(await queryRows(db, "SELECT * FROM songs ORDER BY id"), after.tables.songs);
+    assert.deepEqual(await queryRows(db, "SELECT * FROM song_entries ORDER BY id"), after.tables.song_entries);
+    assert.deepEqual(await queryRows(db, "PRAGMA foreign_key_check"), []);
+    assert.equal((await queryRows(db, "PRAGMA foreign_keys"))[0].foreign_keys, 1);
+    assert.equal((await queryRows(db, "PRAGMA defer_foreign_keys"))[0].defer_foreign_keys, 0);
+    assert.equal((await call(env, "/api/admin/patch/commit", { version })).status, 200);
+  });
+}
+
 test("incremental patch applies row updates and dependency-safe deletes atomically", async (t) => {
-  const db = await createDb();
+  const db = await createMigratedDb();
   t.after(() => db.close());
   const env = { DB: db, SEED_TOKEN: "test-token" };
   const oldRows = dataset("1");
@@ -114,7 +142,7 @@ test("incremental patch applies row updates and dependency-safe deletes atomical
 });
 
 test("an incomplete or stale patch leaves the live dataset unchanged", async (t) => {
-  const db = await createDb();
+  const db = await createMigratedDb();
   t.after(() => db.close());
   const env = { DB: db, SEED_TOKEN: "test-token" };
   const oldRows = dataset("1");
@@ -153,11 +181,15 @@ test("an incomplete or stale patch leaves the live dataset unchanged", async (t)
 });
 
 test("a failed patch commit rolls back every live table", async (t) => {
-  const db = await createDb();
+  const db = await createMigratedDb();
   t.after(() => db.close());
   const env = { DB: db, SEED_TOKEN: "test-token" };
   const rows = dataset("1");
   await fullImport(env, "old", rows);
+  const before = {};
+  for (const table of [...TABLES, "dataset_meta"]) {
+    before[table] = await queryRows(db, `SELECT * FROM ${table}`);
+  }
 
   assert.equal((await call(env, "/api/admin/patch/start", {
     version: "broken",
@@ -188,4 +220,9 @@ test("a failed patch commit rolls back every live table", async (t) => {
     song_entries: [1],
   });
   assert.deepEqual(await queryRows(db, "SELECT song_id FROM song_entries"), [{ song_id: 1 }]);
+  for (const table of [...TABLES, "dataset_meta"]) {
+    assert.deepEqual(await queryRows(db, `SELECT * FROM ${table}`), before[table]);
+  }
+  assert.equal((await queryRows(db, "PRAGMA defer_foreign_keys"))[0].defer_foreign_keys, 0);
+  assert.deepEqual(await queryRows(db, "PRAGMA foreign_key_check"), []);
 });

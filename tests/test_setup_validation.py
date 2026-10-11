@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from contextlib import ExitStack
 from pathlib import Path
 import tempfile
 import threading
@@ -17,6 +18,18 @@ class SetupValidationTests(unittest.TestCase):
         self.app_dir = Path(self._temp_directory.name)
         self.log_path = self.app_dir / "logs" / "setup.log"
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        # Every GET / initializes the database and reads config. Keep even the
+        # cookie/bootstrap requests isolated from the developer's real data.
+        self.patches = ExitStack()
+        self.addCleanup(self.patches.close)
+        for name, value in (
+            ("get_database_path", self.app_dir / "songs.sqlite3"),
+            ("get_app_dir", self.app_dir),
+            ("read_saved_api_key", ""),
+            ("read_saved_site_base_url", ""),
+            ("read_saved_site_seed_token", ""),
+        ):
+            self.patches.enter_context(patch.object(indexer_app, name, return_value=value))
         self._reset_job_state()
 
     def tearDown(self) -> None:
@@ -296,7 +309,7 @@ class SetupValidationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 500)
         self.assertFalse(self._state()["running"])
 
-    def test_delete_channel_requires_exact_confirmation_and_site_sync_config(self):
+    def test_delete_channel_requires_exact_confirmation_and_rejects_partial_site_config(self):
         db_path = self.app_dir / "songs.sqlite3"
         db = SongDatabase(db_path)
         db.init_schema()
@@ -313,7 +326,7 @@ class SetupValidationTests(unittest.TestCase):
             )
             missing_sync = client.post(
                 "/delete-channel",
-                data={"channel_id": "channel", "confirmation": "Test Channel"},
+                data={"channel_id": "channel", "confirmation": "Test Channel", "site_base_url": "https://site.test"},
             )
 
         self.assertEqual(wrong.status_code, 400)

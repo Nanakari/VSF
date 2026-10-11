@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import fs from "node:fs";
 import { test } from "node:test";
 
 import worker from "../worker/index.js";
+import { createMigratedDb } from "./helpers/worker_db.mjs";
 import { queryRows, SqliteD1 } from "./helpers/sqlite_d1.mjs";
 
 const TABLES = {
@@ -20,39 +20,6 @@ const EMPTY_COUNTS = {
   songs: 0,
   song_entries: 0,
 };
-
-async function createDb() {
-  const db = new SqliteD1();
-  await db.prepare("PRAGMA foreign_keys = ON").run();
-  await db.batch([
-    db.prepare("CREATE TABLE channels (channel_id TEXT PRIMARY KEY NOT NULL, channel_title TEXT NOT NULL)"),
-    db.prepare("CREATE TABLE videos (video_id TEXT PRIMARY KEY NOT NULL, channel_id TEXT NOT NULL, title TEXT NOT NULL, published_at TEXT, url TEXT NOT NULL, indexed_at TEXT NOT NULL, FOREIGN KEY (channel_id) REFERENCES channels(channel_id))"),
-    db.prepare("CREATE TABLE song_groups (group_key TEXT PRIMARY KEY NOT NULL, song_title TEXT NOT NULL, artist TEXT NOT NULL, title_search TEXT NOT NULL, artist_search TEXT NOT NULL, entry_count INTEGER NOT NULL, channel_count INTEGER NOT NULL)"),
-    db.prepare("CREATE TABLE songs (id INTEGER PRIMARY KEY NOT NULL, channel_id TEXT NOT NULL, canonical_song_title TEXT NOT NULL, normalized_song_title TEXT NOT NULL, artist TEXT NOT NULL, group_key TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY (channel_id) REFERENCES channels(channel_id), FOREIGN KEY (group_key) REFERENCES song_groups(group_key))"),
-    db.prepare("CREATE TABLE song_entries (id INTEGER PRIMARY KEY NOT NULL, song_id INTEGER NOT NULL, group_key TEXT NOT NULL, video_id TEXT NOT NULL, timestamp_text TEXT NOT NULL, seconds INTEGER NOT NULL, raw_song_title TEXT NOT NULL, normalized_song_title TEXT NOT NULL, source_comment TEXT NOT NULL, jump_url TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY (song_id) REFERENCES songs(id), FOREIGN KEY (group_key) REFERENCES song_groups(group_key), FOREIGN KEY (video_id) REFERENCES videos(video_id))"),
-  ]);
-  return db;
-}
-
-async function createMigratedDb() {
-  const db = new SqliteD1();
-  await db.prepare("PRAGMA foreign_keys = ON").run();
-  const migrationDir = new URL("../drizzle/", import.meta.url);
-  const migrationFiles = fs.readdirSync(migrationDir)
-    .filter((name) => name.endsWith(".sql"))
-    .sort();
-  for (const name of migrationFiles) {
-    const migration = fs.readFileSync(new URL(name, migrationDir), "utf8");
-    const statements = migration
-      .split(/-->\s*statement-breakpoint/)
-      .map((statement) => statement.trim())
-      .filter(Boolean);
-    for (const statement of statements) {
-      await db.prepare(statement).run();
-    }
-  }
-  return db;
-}
 
 function dataset(prefix, { invalidEntrySongId = null } = {}) {
   const channelId = `channel-${prefix}`;
@@ -131,7 +98,7 @@ async function liveIds(db) {
 }
 
 test("same-version start retry preserves staging rows and rejects count drift", async (t) => {
-  const db = await createDb();
+  const db = await createMigratedDb();
   t.after(() => db.close());
   const env = { DB: db, SEED_TOKEN: "test-token" };
   const rows = dataset("1");
@@ -151,7 +118,7 @@ test("same-version start retry preserves staging rows and rejects count drift", 
 });
 
 test("a newer start removes superseded staging rows and a delayed old seed cannot restore them", async (t) => {
-  const db = await createDb();
+  const db = await createMigratedDb();
   t.after(() => db.close());
   const env = { DB: db, SEED_TOKEN: "test-token" };
   const oldRows = dataset("1");
@@ -191,7 +158,7 @@ test("a newer start removes superseded staging rows and a delayed old seed canno
 });
 
 test("a delayed old seed cannot write after a newer start", async (t) => {
-  const db = await createDb();
+  const db = await createMigratedDb();
   t.after(() => db.close());
   const env = { DB: db, SEED_TOKEN: "test-token" };
   const oldRows = dataset("1");
@@ -227,7 +194,7 @@ test("a delayed old seed cannot write after a newer start", async (t) => {
 });
 
 test("a delayed old commit cannot swap or damage the newer snapshot", async (t) => {
-  const db = await createDb();
+  const db = await createMigratedDb();
   t.after(() => db.close());
   const env = { DB: db, SEED_TOKEN: "test-token" };
   const oldRows = dataset("1");
@@ -261,7 +228,7 @@ test("a delayed old commit cannot swap or damage the newer snapshot", async (t) 
 });
 
 test("incomplete snapshot leaves live data unchanged", async (t) => {
-  const db = await createDb();
+  const db = await createMigratedDb();
   t.after(() => db.close());
   const env = { DB: db, SEED_TOKEN: "test-token" };
   const oldRows = dataset("1");
@@ -279,7 +246,7 @@ test("incomplete snapshot leaves live data unchanged", async (t) => {
 });
 
 test("a failed live swap rolls back every table", async (t) => {
-  const db = await createDb();
+  const db = await createMigratedDb();
   t.after(() => db.close());
   const env = { DB: db, SEED_TOKEN: "test-token" };
   const oldRows = dataset("1");
@@ -297,7 +264,7 @@ test("a failed live swap rolls back every table", async (t) => {
 });
 
 test("successful commit deletes stale live rows and repeated commit is idempotent", async (t) => {
-  const db = await createDb();
+  const db = await createMigratedDb();
   t.after(() => db.close());
   const env = { DB: db, SEED_TOKEN: "test-token" };
   const oldRows = dataset("1");

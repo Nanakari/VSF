@@ -11,6 +11,7 @@ from typing import Callable
 import requests
 
 from database import SongDatabase
+from network_errors import redact_secret
 from song_identity import make_title_search_text, parse_song_identity
 
 
@@ -355,24 +356,33 @@ def request_json(
     token: str,
     payload: dict[str, object],
 ) -> dict[str, object]:
-    response = session.post(
-        url,
-        headers={"x-seed-token": token},
-        json=payload,
-        timeout=120,
-    )
+    response = None
+    error_type = "RequestException"
+    try:
+        response = session.post(
+            url,
+            headers={"x-seed-token": token},
+            json=payload,
+            timeout=120,
+        )
+    except requests.RequestException as exc:
+        error_type = type(exc).__name__
+    if response is None:
+        # Do not retain transport errors: they may include credentials or
+        # request headers. Keep normal tracebacks safe for diagnostic logs.
+        raise RuntimeError(f"Site sync request failed ({error_type})") from None
     try:
         body = response.json()
     except ValueError:
         body = {}
     if not response.ok:
         raise SiteSyncHTTPError(
-            url,
+            redact_secret(url, token),
             response.status_code,
-            str(body.get("message", "unknown error")),
+            redact_secret(body.get("message", "unknown error"), token),
         )
     if body.get("ok") is False:
-        raise RuntimeError(f"{url} failed: {body.get('message', 'unknown error')}")
+        raise RuntimeError(redact_secret(f"{url} failed: {body.get('message', 'unknown error')}", token))
     return body
 
 

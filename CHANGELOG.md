@@ -4,6 +4,10 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+- Reject untrusted Host headers before issuing local sessions, and reject cross-origin browser management writes in both local applications.
+- Keep credentials out of network failure messages and exception chains; redact credentials echoed by YouTube and site sync error responses.
+- Leave optional site sync configuration empty by default so a fresh local installation does not contact a placeholder site.
+
 ## [0.3.2] - 2026-10-11
 
 - Wait a full idle grace period after the last browser page closes, preventing frozen Windows apps from exiting during search navigation or reloads.

@@ -94,9 +94,11 @@ Copy-Item .env.example .env
 
 ```env
 YOUTUBE_API_KEY=your_api_key_here
-SITE_BASE_URL=https://your-site.chatgpt.site
-SITE_SEED_TOKEN=your_site_seed_token_here
+SITE_BASE_URL=
+SITE_SEED_TOKEN=
 ```
+
+两个站点值默认留空，表示只使用本地索引和搜索；只有部署了自己的站点后才填写真实的 `https://` 站点地址和对应令牌。已有 `.env` 如果仍保存示例站点地址和令牌，请删除这两个值以恢复仅本地模式。
 
 同步基线按站点地址隔离，更换地址会执行完整同步；不完整的基线不会用于跳过上传。升级前未绑定站点的旧基线会被忽略，因此升级后的首次同步会完整上传一次。
 
@@ -278,6 +280,8 @@ logs/app.log
 如果设置工具正在执行索引任务，退出请求会被拒绝；任务完成后再关闭设置工具，避免后台任务被强制中断。
 
 本地管理接口只接受回环地址上的同源会话 Cookie；索引状态、启动任务和退出操作不会接受没有会话的请求。关闭页面接口的 GET 请求只显示提示页，不会触发进程退出。
+
+本地服务只接受 `localhost`、`127.0.0.1` 和 `[::1]` 的 Host；自定义域名和反向代理地址不受支持。浏览器管理写请求的 Origin 必须与当前页面的协议、主机和端口一致。没有浏览器 Origin/Fetch Metadata 的本地客户端仍可使用会话认证。
 
 另有独立设置工具 `VTuberSongFinderSetup.exe`，用于创建或更新自己的频道数据库。它不会集成进主搜索程序：
 

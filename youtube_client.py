@@ -8,6 +8,8 @@ from urllib.parse import urlparse
 
 import requests
 
+from network_errors import redact_secret
+
 
 YOUTUBE_API_BASE = "https://www.googleapis.com/youtube/v3"
 SONG_STREAM_KEYWORDS = [
@@ -251,30 +253,35 @@ class YouTubeClient:
         request_params = dict(params)
         request_params["key"] = self.api_key
 
-        last_error: requests.RequestException | None = None
+        last_error_type = "RequestException"
         response: requests.Response | None = None
         for attempt in range(self.max_retries):
             try:
                 response = self.session.get(url, params=request_params, timeout=self.timeout)
-            except requests.Timeout as exc:
-                last_error = exc
             except requests.RequestException as exc:
-                last_error = exc
+                # requests errors can embed the prepared URL, including key=.
+                # Keep only a diagnostic category, never the exception object.
+                last_error_type = type(exc).__name__
             else:
                 if response.ok:
                     try:
-                        return response.json()
-                    except ValueError as exc:
-                        raise YouTubeAPIError(
-                            f"YouTube API returned invalid JSON for {endpoint}"
-                        ) from exc
+                        body = response.json()
+                    except ValueError:
+                        pass
+                    else:
+                        return body
+                    # Raise outside the handler so neither __cause__ nor
+                    # __context__ retains an upstream exception or response.
+                    raise YouTubeAPIError(
+                        f"YouTube API returned invalid JSON for {endpoint}"
+                    ) from None
 
                 payload = _response_payload(response)
                 reason = _extract_error_reason(payload)
                 if not _is_retryable_response(response.status_code, reason):
-                    return _raise_response_error(response, payload, reason)
+                    return _raise_response_error(response, payload, reason, self.api_key)
                 if attempt == self.max_retries - 1:
-                    return _raise_response_error(response, payload, reason)
+                    return _raise_response_error(response, payload, reason, self.api_key)
 
                 time.sleep(_retry_delay(response, attempt))
                 continue
@@ -285,8 +292,8 @@ class YouTubeClient:
         if response is None:
             raise YouTubeAPIError(
                 f"YouTube API request timed out or failed for {endpoint} "
-                f"after {self.max_retries} attempts. Last error: {last_error}"
-            ) from last_error
+                f"after {self.max_retries} attempts. Error type: {last_error_type}"
+            ) from None
 
         raise YouTubeAPIError(f"YouTube API request failed for {endpoint}")
 
@@ -387,15 +394,16 @@ def _raise_response_error(
     response: requests.Response,
     payload: dict[str, Any],
     reason: str,
+    api_key: str = "",
 ) -> dict[str, Any]:
-    message = _extract_error_message(payload) or response.text
+    message = redact_secret(_extract_error_message(payload) or response.text, api_key)
     if reason in {"commentsDisabled", "disabledComments"}:
         raise CommentsDisabledError(message)
     if reason in {"quotaExceeded", "dailyLimitExceeded"}:
         raise QuotaExceededError(message)
     if response.status_code == 404:
         raise YouTubeAPIError(f"Resource not found: {message}")
-    raise YouTubeAPIError(f"YouTube API error ({response.status_code}, {reason}): {message}")
+    raise YouTubeAPIError(f"YouTube API error ({response.status_code}, {redact_secret(reason, api_key)}): {message}")
 
 
 def _extract_error_reason(payload: dict[str, Any]) -> str:

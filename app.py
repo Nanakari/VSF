@@ -20,6 +20,7 @@ from werkzeug.exceptions import HTTPException
 
 from config import get_app_dir, get_database_path, get_resource_dir
 from database import SongDatabase
+from local_security import install_local_host_guard, require_local_management_request
 
 
 PAGE_SIZE = 20
@@ -27,7 +28,6 @@ SHUTDOWN_DELAY_SECONDS = 3
 AUTO_EXIT_ENABLED = bool(getattr(sys, "frozen", False))
 LOCAL_SESSION_TOKEN = secrets.token_urlsafe(32)
 LOCAL_SESSION_COOKIE = f"VTuberSongFinderSession{5000}"
-LOOPBACK_ADDRESSES = {"127.0.0.1", "::1"}
 SCHEMA_LOCK = threading.Lock()
 SCHEMA_READY = False
 active_clients: dict[str, float] = {}
@@ -82,11 +82,12 @@ app = Flask(
 app.logger.handlers.clear()
 app.logger.propagate = True
 logging.getLogger("werkzeug").setLevel(logging.INFO)
+install_local_host_guard(app)
 
 
 @app.after_request
 def attach_local_session_cookie(response: Response) -> Response:
-    if request.method == "GET" and request.path == "/":
+    if request.method == "GET" and request.path == "/" and response.status_code < 400:
         response.set_cookie(
             LOCAL_SESSION_COOKIE,
             LOCAL_SESSION_TOKEN,
@@ -97,8 +98,7 @@ def attach_local_session_cookie(response: Response) -> Response:
 
 
 def require_local_management() -> None:
-    if request.remote_addr not in LOOPBACK_ADDRESSES:
-        abort(403)
+    require_local_management_request()
     supplied = request.headers.get("X-VTuber-Session") or request.cookies.get(LOCAL_SESSION_COOKIE, "")
     if not hmac.compare_digest(supplied, LOCAL_SESSION_TOKEN):
         abort(403)
